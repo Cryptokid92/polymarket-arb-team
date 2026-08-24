@@ -10,5 +10,4 @@ Do not commit paper JSONL, sqlite, `.env`, or keys.
 | [2026-08-24-paper-hour1-halt.md](2026-08-24-paper-hour1-halt.md) | Hour-1 halt | Book age wired as WS age. |
 | [2026-08-24-cursor-review-ws-age.md](2026-08-24-cursor-review-ws-age.md) | After Grok `5010bbf` | Cursor pass, merged `42e4384`. |
 | [2026-08-24-paper-hour2-ws-decimal-crash.md](2026-08-24-paper-hour2-ws-decimal-crash.md) | Hour-2 runner death | Bad WS book field → ConversionSyntax. |
-
-The six-agent Cursor debug report is not in yet (agent still running).
+| [2026-08-24-cursor-6-agent-ws-decimal.md](2026-08-24-cursor-6-agent-ws-decimal.md) | After 6-lane debug | Exact field `min_order_size` → `"None"`. PR #15. |
