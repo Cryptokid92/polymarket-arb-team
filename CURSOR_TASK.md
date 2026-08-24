@@ -1,11 +1,11 @@
-# Cursor review — Task 4 only
+# Cursor review — Task 5 only
 
-Review the Task 4 hunter commit. Do not implement Tasks 5–12.
+Review the Task 5 risk-agent commit. Do not implement Tasks 6–12.
 
 ## Run
 
 ```bash
-uv run pytest tests/test_hunter.py tests/test_books.py tests/test_fees.py tests/test_money.py -q
+uv run pytest tests/test_risk.py tests/test_hunter.py tests/test_books.py tests/test_fees.py tests/test_money.py -q
 ```
 
 ## Do not
@@ -18,10 +18,8 @@ uv run pytest tests/test_hunter.py tests/test_books.py tests/test_fees.py tests/
 
 ## Check
 
-- `gap_3c.json` emits `GapFound` with fillable 80 and `raw_edge == 0.03`.
-- `no_gap.json` returns None.
-- Bid-only completeness (asks still sum >= `1 - min_edge`) returns None.
-- `book_age_ms` on `stale_one_side.json` uses the older book `ts_ms`.
-- Hunt sizes with `fillable_pair_size` + `walk_asks` on asks only — not bids or mids.
-- `raw_edge = 1 - yes_vwap - no_vwap` and is never rounded up.
+- One pass: `gap_3c` + healthy flags + empty portfolio + default settings (may clip notional).
+- Hard rejects: halted, not binary, not accepting orders, `seconds_delay > 0`, `neg_risk`, stale book (`stale_one_side.json`), `raw_edge > max_gap`, `open_pairs` cap, daily loss, uncompletable walk, notional that cannot clip.
+- `delayed_market.json` is used for the delay reject.
+- After a clip, both sides are re-walked at the same size.
 - Decimal only.
