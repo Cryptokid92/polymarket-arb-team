@@ -1,0 +1,4 @@
+{"ts_ms": 1700000000000, "condition_id": "0x1", "reason": "neg_risk"}
+{"ts_ms": 1700000000500, "condition_id": "0x2", "reason": "stale"}
+{"ts_ms": 1700000001000, "condition_id": "0xdef", "reason": "stale"}
+{"ts_ms": 1700000001500, "condition_id": "0x3", "reason": "short_crypto_window"}

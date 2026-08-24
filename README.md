@@ -35,6 +35,17 @@ Paper only. Reads **public** books. **Cannot place orders.** Never constructs a 
 ```bash
 # Leave ARB_MODE=paper. Do not create ALLOW_LIVE.
 uv run python scripts/paper_run.py --seconds 3600
+```
+
+In another terminal, watch the gitignored logs (read-only local UI, binds `127.0.0.1:8765`):
+
+```bash
+uv run python scripts/paper_ui.py --data-dir data/paper
+```
+
+Then summarize from the command line if you want:
+
+```bash
 uv run python scripts/report_paper.py
 ```
 
@@ -45,6 +56,9 @@ Writes gitignored JSONL (covered by `data/`):
 - `data/paper/gaps.jsonl` — hunter hits (edge, VWAPs, estimated maker/taker EV)
 - `data/paper/intents.jsonl` — paper-only approved intents (`PaperBroker`)
 - `data/paper/rejects.jsonl` — universe / risk / fee reject reasons
+- `data/paper/stats.json` — markets listed / universe / gap / intent / reject counts for the dashboard
+
+`paper_ui.py` is read-only. If the JSONL files are missing it shows zeros and does not invent trades. Banner: **PAPER MODE. Not live. Not financial advice.** Auto-refreshes every 2s.
 
 `report_paper.py` prints: gaps seen, intents approved, estimated maker EV, estimated taker EV, reject reasons.
 
@@ -63,8 +77,9 @@ These match the installed client in this repo. If they drift, follow the install
 - `src/arb/app.py` — hunt → risk → fee pipeline and paper run loop
 - `scripts/paper_run.py` — networked paper runner (public client only)
 - `scripts/report_paper.py` — summarize a paper run
+- `scripts/paper_ui.py` — read-only local dashboard (stdlib `http.server`)
 - `AGENTS.md` — shared law for Grok / Cursor
-- `PLAN.md` — Tasks 1–11 done; Task 12 stays dark
+- `PLAN.md` — Tasks 1–11 done; paper dashboard added; Task 12 stays dark
 
 ## License
 

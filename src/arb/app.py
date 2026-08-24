@@ -249,6 +249,22 @@ def _bump(stats: PaperRunStats, reason: str) -> None:
     stats.rejects[reason] = stats.rejects.get(reason, 0) + 1
 
 
+def write_paper_stats(path: Path, stats: PaperRunStats) -> None:
+    """Atomic snapshot for the read-only paper UI. No account data."""
+    payload = {
+        "markets_listed": stats.markets_listed,
+        "universe": stats.universe,
+        "gaps": stats.gaps,
+        "intents": stats.intents,
+        "rejects": sum(stats.rejects.values()),
+        "reject_reasons": dict(stats.rejects),
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(json.dumps(payload) + "\n", encoding="utf-8")
+    tmp.replace(path)
+
+
 async def _iter_listed_markets(client: Any, max_markets: int) -> list[Any]:
     try:
         listed = client.list_markets(closed=False, page_size=max_markets)
@@ -354,6 +370,7 @@ async def run_paper(
     gaps_path = data_dir / "gaps.jsonl"
     intents_path = data_dir / "intents.jsonl"
     rejects_path = data_dir / "rejects.jsonl"
+    stats_path = data_dir / "stats.json"
     stats = PaperRunStats()
     store = BookStore()
     broker = PaperBroker(log_path=intents_path)
@@ -388,6 +405,7 @@ async def run_paper(
         by_token[pair.yes_token_id] = pair
         by_token[pair.no_token_id] = pair
     stats.universe = len(pairs)
+    write_paper_stats(stats_path, stats)
 
     async def consider(pair: UniversePair) -> None:
         yes = store.get(pair.yes_token_id)
@@ -436,6 +454,7 @@ async def run_paper(
             await paper_execute(trace.intent, broker)
             stats.intents += 1
             portfolio.open_pairs += 1
+        write_paper_stats(stats_path, stats)
 
     token_ids = [token for pair in pairs for token in (pair.yes_token_id, pair.no_token_id)]
     if token_ids:
@@ -445,6 +464,7 @@ async def run_paper(
             await consider(pair)
 
     if once or not token_ids:
+        write_paper_stats(stats_path, stats)
         return stats
 
     deadline = time.monotonic() + seconds
@@ -467,4 +487,5 @@ async def run_paper(
             await consider(pair)
         if time.monotonic() >= deadline:
             break
+    write_paper_stats(stats_path, stats)
     return stats

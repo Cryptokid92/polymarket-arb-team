@@ -31,3 +31,13 @@ Task 11 is done: live-data paper runner that cannot place orders.
 - README documents a 1-hour paper run
 - `ALLOW_LIVE` was not created. Live trading is not enabled. No secrets committed.
 - Remaining: Task 12 stays dark.
+
+Paper dashboard (not Task 12): read-only local UI to watch paper runner logs.
+
+- `scripts/paper_ui.py` — stdlib `http.server`, bind `127.0.0.1:8765`
+- Counts from `stats.json` (written by the paper runner) or JSONL
+- Reject-reason breakdown, recent gaps/intents, halt from `HALT` / `state.sqlite` (read-only)
+- Auto-refresh every 2s
+- Offline fixture tests under `tests/fixtures/paper_ui/`
+- `uv run pytest -q` — 110 passed
+- `ALLOW_LIVE` was not created. Live trading is not enabled. No secrets committed.

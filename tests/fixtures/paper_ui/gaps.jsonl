@@ -1,0 +1,2 @@
+{"ts_ms": 1700000000000, "condition_id": "0xabc", "raw_edge": "0.03", "yes_vwap": "0.55", "no_vwap": "0.42", "fillable_shares": "20", "book_age_ms": 12, "maker_ev": "0.60", "taker_ev": "-0.10", "reject_reason": null}
+{"ts_ms": 1700000001000, "condition_id": "0xdef", "raw_edge": "0.02", "yes_vwap": "0.50", "no_vwap": "0.48", "fillable_shares": "10", "book_age_ms": 80, "maker_ev": "0.20", "taker_ev": "-0.05", "reject_reason": "stale"}

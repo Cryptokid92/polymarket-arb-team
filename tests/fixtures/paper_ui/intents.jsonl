@@ -1,0 +1,2 @@
+{"path": "maker_gtc", "size": "20", "yes_limit": "0.55", "no_limit": "0.42", "expected_net_edge": "0.60"}
+{"path": "taker_fak", "size": "8", "yes_limit": "0.51", "no_limit": "0.47", "expected_net_edge": "0.12"}
