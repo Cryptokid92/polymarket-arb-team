@@ -1,24 +1,24 @@
 # Plan (paper-only)
 
-Not financial advice. No guaranteed PnL. Live trading is out of scope for every task listed here.
+Not financial advice. No guaranteed PnL. Do not enable live trading. Do not create `ALLOW_LIVE`.
 
 ## Task 1 — Scaffold — done
 
-Repo layout, MIT license, paper-default `Settings`, Decimal money helpers, dual live gate (`ARB_MODE=live` **and** a human-created `ALLOW_LIVE` dated today). Tests: `uv run pytest tests/test_money.py -q`.
+Repo layout, MIT license, paper-default `Settings`, Decimal money helpers, dual live gate. Cursor: OK `15db598`.
 
-## Remaining paper-only tasks
+## Task 2 — Fees (pure function)
 
-Later specialists land these one at a time. Do not enable live. Do not put an LLM in the hot path.
+Protocol taker fee `C * feeRate * p * (1-p)`. Makers pay 0. Never include maker rebates in EV. Official table rounding (100 crypto @ $0.01 → $0.07). Tests: `uv run pytest tests/test_fees.py tests/test_money.py -q`.
 
-2. Official `polymarket-client` wrapper (`AsyncPublicClient` / `AsyncSecureClient` imports only). Read-only paper wiring. No live orders.
-3. Discover binary completeness pairs (YES + NO on the same event) from public market data.
-4. Quote / book snapshots with `STALE_MS` rejection.
-5. Decimal edge and gap (`MIN_EDGE`, `MAX_GAP`). Makers pay 0; never hardcode fees.
-6. Risk gates from settings: `MAX_NOTIONAL_PER_TRADE_PUSD`, `MAX_DAILY_LOSS_PUSD`, `MAX_OPEN_PAIRS`.
-7. Paper matching / simulated fills. Persist only under gitignored `data/`.
-8. Two-leg pair executor with `HEDGE_TIMEOUT_MS`. A half-filled arb is worse than no trade.
-9. WebSocket market data with `WS_STALE_MS`.
-10. Local paper state (sqlite/files under `data/`, never committed).
-11. Paper runner: `HALT` file, daily-loss trip, CLI. Still paper-only.
+## Remaining (paper only)
 
-Task 12+ (any live path) is not in this plan.
+3. Book store + ask walk
+4. Hunter
+5. Risk agent
+6. Fee agent
+7. Paper executor + bus wiring
+8. Merge + naked-leg hedge (simulated)
+9. Kill switch, state dump, preflight
+10. Recorder + backtest + adversary
+11. Paper runner (networked, no orders)
+12. Live path (build dark, do not run) — not now
