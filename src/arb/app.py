@@ -65,7 +65,11 @@ class PaperRunStats:
 
 
 class StreamHeartbeat:
-    """Last stream/poll *receive* time. Distinct from CLOB Book.ts_ms."""
+    """Last stream/poll *receive* time. Distinct from CLOB Book.ts_ms.
+
+    A successful REST liveness probe counts as a receive. Quiet books do not
+    mean the socket is dead; a failed probe or dead subscribe does.
+    """
 
     _NEVER_RECEIVED_AGE_MS = 10**15
 
@@ -79,6 +83,16 @@ class StreamHeartbeat:
         if self.last_receive_ms is None:
             return self._NEVER_RECEIVED_AGE_MS
         return max(0, now_ms - self.last_receive_ms)
+
+
+def stream_liveness_probe_due(*, age_ms: int, ws_stale_ms: int) -> bool:
+    """True when subscribe silence is approaching ws_stale_ms.
+
+    Do not raise ws_stale_ms. Probe REST first; trip only if that poll fails.
+    """
+    if ws_stale_ms <= 0:
+        return False
+    return age_ms >= max(1, (ws_stale_ms * 2) // 3)
 
 
 def run_pipeline(
@@ -338,11 +352,18 @@ async def _updates(
 ) -> AsyncIterator[Any]:
     subscribe = getattr(client, "subscribe", None)
     if callable(subscribe):
-        stream = subscribe(list(token_ids))
-        if inspect.isawaitable(stream):
-            stream = await stream
-        async for event in stream:
-            yield event
+        try:
+            stream = subscribe(list(token_ids))
+            if inspect.isawaitable(stream):
+                stream = await stream
+            async for event in stream:
+                yield event
+        except asyncio.CancelledError:
+            raise
+        except PublicApiError:
+            raise
+        except Exception as exc:
+            raise PublicApiError(f"public API is unreachable: {exc}") from exc
         return
     while True:
         yield await _fetch_books(client, token_ids)
@@ -499,70 +520,114 @@ async def run_paper(
 
     deadline = time.monotonic() + seconds
 
+    def trip_dead_stream() -> None:
+        """Persist ws_stale. Never auto-resumes."""
+        now_ms = _now_ms()
+        kill.evaluate(
+            daily_pnl=portfolio.daily_pnl,
+            ws_age_ms=settings.ws_stale_ms + 1,
+            now_ms=now_ms,
+        )
+        portfolio.halted = not kill.allow_new_intents()
+
+    async def handle_update(update: Any) -> None:
+        now_ms = _now_ms()
+        heartbeat.mark(now_ms)
+        try:
+            _apply_update(store, update, now_ms)
+        except InvalidOperation as exc:
+            payload = getattr(update, "payload", update)
+            token = str(getattr(payload, "token_id", "") or "")
+            _append_jsonl(
+                rejects_path,
+                {
+                    "ts_ms": now_ms,
+                    "token_id": token,
+                    "reason": "invalid_book_update",
+                    "detail": f"{type(exc).__name__}: {exc}"[:200],
+                },
+            )
+            _bump(stats, "invalid_book_update")
+            write_paper_stats(stats_path, stats)
+            return
+        seen: set[str] = set()
+        if isinstance(update, (list, tuple)):
+            tokens = [str(getattr(book, "token_id", "")) for book in update]
+        else:
+            payload = getattr(update, "payload", update)
+            token = getattr(payload, "token_id", None)
+            tokens = [str(token)] if token else list(by_token)
+            for change in getattr(payload, "price_changes", ()) or ():
+                tokens.append(str(change.token_id))
+        for token in tokens:
+            pair = by_token.get(token)
+            if pair is None or pair.condition_id in seen:
+                continue
+            seen.add(pair.condition_id)
+            await consider(pair)
+
     async def consume() -> None:
-        async for update in _updates(client, token_ids, poll_s):
-            now_ms = _now_ms()
-            heartbeat.mark(now_ms)
-            try:
-                _apply_update(store, update, now_ms)
-            except InvalidOperation as exc:
-                payload = getattr(update, "payload", update)
-                token = str(getattr(payload, "token_id", "") or "")
-                _append_jsonl(
-                    rejects_path,
-                    {
-                        "ts_ms": now_ms,
-                        "token_id": token,
-                        "reason": "invalid_book_update",
-                        "detail": f"{type(exc).__name__}: {exc}"[:200],
-                    },
-                )
-                _bump(stats, "invalid_book_update")
-                write_paper_stats(stats_path, stats)
+        try:
+            async for update in _updates(client, token_ids, poll_s):
+                await handle_update(update)
                 if time.monotonic() >= deadline:
                     return
-                continue
-            seen: set[str] = set()
-            if isinstance(update, (list, tuple)):
-                tokens = [str(getattr(book, "token_id", "")) for book in update]
-            else:
-                payload = getattr(update, "payload", update)
-                token = getattr(payload, "token_id", None)
-                tokens = [str(token)] if token else list(by_token)
-                for change in getattr(payload, "price_changes", ()) or ():
-                    tokens.append(str(change.token_id))
-            for token in tokens:
-                pair = by_token.get(token)
-                if pair is None or pair.condition_id in seen:
-                    continue
-                seen.add(pair.condition_id)
-                await consider(pair)
-            if time.monotonic() >= deadline:
-                return
+        except asyncio.CancelledError:
+            raise
+        except PublicApiError:
+            trip_dead_stream()
+            return
+        if time.monotonic() < deadline:
+            trip_dead_stream()
 
     async def watch_silence() -> None:
         interval_s = max(0.02, min(poll_s, settings.ws_stale_ms / 1000))
+        probe_timeout_s = max(0.05, settings.ws_stale_ms / 1000)
         while True:
             await asyncio.sleep(interval_s)
             now_ms = _now_ms()
+            if not kill.allow_new_intents():
+                kill.evaluate(
+                    daily_pnl=portfolio.daily_pnl,
+                    ws_age_ms=heartbeat.age_ms(now_ms),
+                    now_ms=now_ms,
+                )
+                continue
+            age = heartbeat.age_ms(now_ms)
+            if stream_liveness_probe_due(
+                age_ms=age, ws_stale_ms=settings.ws_stale_ms
+            ):
+                try:
+                    books = await asyncio.wait_for(
+                        _fetch_books(client, token_ids),
+                        timeout=probe_timeout_s,
+                    )
+                except (PublicApiError, TimeoutError, asyncio.TimeoutError):
+                    trip_dead_stream()
+                    continue
+                await handle_update(books)
+                continue
             kill.evaluate(
                 daily_pnl=portfolio.daily_pnl,
-                ws_age_ms=heartbeat.age_ms(now_ms),
+                ws_age_ms=age,
                 now_ms=now_ms,
             )
 
     watch = asyncio.create_task(watch_silence())
     try:
         remaining = deadline - time.monotonic()
+        finished_on_timeout = False
         if remaining > 0:
             try:
                 await asyncio.wait_for(consume(), timeout=remaining)
             except asyncio.TimeoutError:
-                pass
+                finished_on_timeout = True
         now_ms = _now_ms()
+        # Planned window end is not a dead socket. watch_silence already
+        # probed; do not race an in-flight REST poll into a false ws_stale.
         kill.evaluate(
             daily_pnl=portfolio.daily_pnl,
-            ws_age_ms=heartbeat.age_ms(now_ms),
+            ws_age_ms=0 if finished_on_timeout else heartbeat.age_ms(now_ms),
             now_ms=now_ms,
         )
     finally:

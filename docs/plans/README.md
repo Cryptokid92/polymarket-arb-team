@@ -12,5 +12,6 @@ Do not put live keys, `.env`, paper fills, or sqlite in this folder.
 | [grok-ws-age-fix.md](grok-ws-age-fix.md) | Grok Build 24 Aug 2026 | Kill-switch WS age is stream receive, not book `ts`. |
 | [cursor-review-ws-age.md](cursor-review-ws-age.md) | Cursor 24 Aug 2026 | Review `5010bbf` / merge if good. |
 | [cursor-debug-ws-decimal-6-agents.md](cursor-debug-ws-decimal-6-agents.md) | Cursor 24 Aug 2026 | Six-lane debug of the WS Decimal crash. |
+| [cursor-fix-quiet-ws-stale.md](cursor-fix-quiet-ws-stale.md) | Cursor 24 Aug 2026 | Quiet live WS must not trip `ws_stale`. |
 
 Paper only. No `ALLOW_LIVE`.
