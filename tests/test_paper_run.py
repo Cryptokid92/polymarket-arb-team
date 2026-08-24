@@ -12,7 +12,13 @@ import pytest
 
 from polymarket.models.clob.market_events import parse_market_event
 
-from arb.app import PublicApiError, StreamHeartbeat, reject_universe, run_paper
+from arb.app import (
+    PublicApiError,
+    StreamHeartbeat,
+    reject_universe,
+    run_paper,
+    stream_liveness_probe_due,
+)
 from arb.config import Settings
 from arb.money import d
 from arb.state import StateStore
@@ -123,6 +129,7 @@ class _MockPublic:
         self.books = books
         self.fail_list = fail_list
         self.fail_books = fail_books
+        self.book_calls = 0
         self.list_kwargs: dict[str, object] = {}
 
     def list_markets(self, *, closed: bool = False, page_size: int = 20, **kwargs):
@@ -132,21 +139,70 @@ class _MockPublic:
         return _Paginator(self.markets)
 
     async def get_order_books(self, *, token_ids: list[str]):
+        self.book_calls += 1
         if self.fail_books:
             raise TimeoutError("timed out")
         return [self.books[tid] for tid in token_ids if tid in self.books]
 
 
+def _keep_subscribe_open(events: list[object]):
+    async def gen():
+        for event in events:
+            yield event
+        while True:
+            await asyncio.sleep(60)
+            yield []
+
+    return gen()
+
+
 class _SilentStreamPublic(_MockPublic):
-    """Public client whose websocket never delivers another event."""
+    """Public client whose websocket stays open but never delivers another event."""
+
+    def subscribe(self, token_ids: list[str]):
+        return _keep_subscribe_open([])
+
+
+class _ClosedStreamPublic(_MockPublic):
+    """Subscribe iterator ends immediately after the REST snapshot."""
 
     def subscribe(self, token_ids: list[str]):
         async def gen():
-            while True:
-                await asyncio.sleep(60)
+            if False:
                 yield []
 
         return gen()
+
+
+class _ErrorStreamPublic(_MockPublic):
+    """Subscribe iterator raises. Dead socket, not quiet books."""
+
+    def subscribe(self, token_ids: list[str]):
+        async def gen():
+            raise ConnectionError("ws closed")
+            yield []
+
+        return gen()
+
+
+class _QuietThenDeadRest(_SilentStreamPublic):
+    """Live quiet subscribe; REST liveness probe fails after the first snapshot."""
+
+    async def get_order_books(self, *, token_ids: list[str]):
+        self.book_calls += 1
+        if self.book_calls > 1:
+            raise TimeoutError("timed out")
+        return [self.books[tid] for tid in token_ids if tid in self.books]
+
+
+class _PollBooksFailAfterFirst(_MockPublic):
+    """No subscribe. Loop poll fetch fails after the opening snapshot."""
+
+    async def get_order_books(self, *, token_ids: list[str]):
+        self.book_calls += 1
+        if self.book_calls > 1:
+            raise TimeoutError("timed out")
+        return [self.books[tid] for tid in token_ids if tid in self.books]
 
 
 def _ws_book(token_id: str, bid: str, ask: str, *, min_order_size: str = "") -> object:
@@ -169,33 +225,35 @@ class _WsNoneMinPublic(_MockPublic):
     """REST books succeed; WS book events omit optional min_order_size."""
 
     def subscribe(self, token_ids: list[str]):
-        async def gen():
-            yield _ws_book("yes-gap-3c", "0.54", "0.55")
-            yield _ws_book("no-gap-3c", "0.41", "0.42")
-
-        return gen()
+        return _keep_subscribe_open(
+            [
+                _ws_book("yes-gap-3c", "0.54", "0.55"),
+                _ws_book("no-gap-3c", "0.41", "0.42"),
+            ]
+        )
 
 
 class _WsBadLevelPublic(_MockPublic):
     """One WS book has an empty ask price after a good REST snapshot."""
 
     def subscribe(self, token_ids: list[str]):
-        async def gen():
-            yield SimpleNamespace(
-                type="book",
-                payload=SimpleNamespace(
-                    token_id="yes-gap-3c",
-                    bids=(SimpleNamespace(price=d("0.54"), size=d("20")),),
-                    asks=(SimpleNamespace(price="", size=d("80")),),
-                    tick_size=d("0.01"),
-                    min_order_size=d("5"),
-                    timestamp=None,
-                    hash="bad-level",
-                    price_changes=(),
-                ),
-            )
-
-        return gen()
+        return _keep_subscribe_open(
+            [
+                SimpleNamespace(
+                    type="book",
+                    payload=SimpleNamespace(
+                        token_id="yes-gap-3c",
+                        bids=(SimpleNamespace(price=d("0.54"), size=d("20")),),
+                        asks=(SimpleNamespace(price="", size=d("80")),),
+                        tick_size=d("0.01"),
+                        min_order_size=d("5"),
+                        timestamp=None,
+                        hash="bad-level",
+                        price_changes=(),
+                    ),
+                )
+            ]
+        )
 
 
 @pytest.mark.asyncio
@@ -422,15 +480,37 @@ async def test_ws_empty_ask_price_is_skipped_without_halt(tmp_path: Path) -> Non
     assert stats.gaps >= 1
 
 
+def test_liveness_probe_due_approaches_ws_stale_ms() -> None:
+    assert stream_liveness_probe_due(age_ms=0, ws_stale_ms=3000) is False
+    assert stream_liveness_probe_due(age_ms=1999, ws_stale_ms=3000) is False
+    assert stream_liveness_probe_due(age_ms=2000, ws_stale_ms=3000) is True
+    assert stream_liveness_probe_due(age_ms=3001, ws_stale_ms=3000) is True
+    assert stream_liveness_probe_due(age_ms=53, ws_stale_ms=80) is True
+
+
+def test_quiet_ws_fix_does_not_loosen_caps() -> None:
+    from arb.config import _EnvSettings
+
+    fields = _EnvSettings.model_fields
+    assert fields["stale_ms"].default == 400
+    assert fields["ws_stale_ms"].default == 3000
+    assert fields["min_edge"].default == Decimal("0.01")
+    assert fields["max_gap"].default == Decimal("0.08")
+    source = Path("src/arb/app.py").read_text(encoding="utf-8")
+    assert "async def watch_silence" in source
+    assert "stream_liveness_probe_due" in source
+
+
+def _gap_books() -> dict[str, object]:
+    return {
+        "yes-gap-3c": _book("yes-gap-3c", "0.54", "0.55"),
+        "no-gap-3c": _book("no-gap-3c", "0.41", "0.42"),
+    }
+
+
 @pytest.mark.asyncio
-async def test_ws_silence_after_snapshot_trips_kill_switch(tmp_path: Path) -> None:
-    client = _SilentStreamPublic(
-        [_market()],
-        {
-            "yes-gap-3c": _book("yes-gap-3c", "0.54", "0.55"),
-            "no-gap-3c": _book("no-gap-3c", "0.41", "0.42"),
-        },
-    )
+async def test_quiet_live_subscribe_does_not_trip_ws_stale(tmp_path: Path) -> None:
+    client = _SilentStreamPublic([_market()], _gap_books())
     data_dir = tmp_path / "paper"
     await run_paper(
         client=client,
@@ -439,6 +519,80 @@ async def test_ws_silence_after_snapshot_trips_kill_switch(tmp_path: Path) -> No
         data_dir=data_dir,
         once=False,
         seconds=0.5,
+        poll_s=0.05,
+    )
+    restored = StateStore(data_dir / "state.sqlite").restore()
+    assert restored.halted is False
+    assert restored.halt_reason == ""
+    assert client.book_calls >= 2
+
+
+@pytest.mark.asyncio
+async def test_quiet_subscribe_failed_rest_probe_trips_ws_stale(tmp_path: Path) -> None:
+    client = _QuietThenDeadRest([_market()], _gap_books())
+    data_dir = tmp_path / "paper"
+    await run_paper(
+        client=client,
+        settings=_settings(ws_stale_ms=80),
+        project_root=tmp_path,
+        data_dir=data_dir,
+        once=False,
+        seconds=0.5,
+        poll_s=0.05,
+    )
+    restored = StateStore(data_dir / "state.sqlite").restore()
+    assert restored.halted is True
+    assert restored.halt_reason == "ws_stale"
+    assert client.book_calls >= 2
+
+
+@pytest.mark.asyncio
+async def test_subscribe_iterator_end_trips_ws_stale(tmp_path: Path) -> None:
+    client = _ClosedStreamPublic([_market()], _gap_books())
+    data_dir = tmp_path / "paper"
+    await run_paper(
+        client=client,
+        settings=_settings(),
+        project_root=tmp_path,
+        data_dir=data_dir,
+        once=False,
+        seconds=0.4,
+        poll_s=0.05,
+    )
+    restored = StateStore(data_dir / "state.sqlite").restore()
+    assert restored.halted is True
+    assert restored.halt_reason == "ws_stale"
+
+
+@pytest.mark.asyncio
+async def test_subscribe_iterator_error_trips_ws_stale(tmp_path: Path) -> None:
+    client = _ErrorStreamPublic([_market()], _gap_books())
+    data_dir = tmp_path / "paper"
+    await run_paper(
+        client=client,
+        settings=_settings(),
+        project_root=tmp_path,
+        data_dir=data_dir,
+        once=False,
+        seconds=0.4,
+        poll_s=0.05,
+    )
+    restored = StateStore(data_dir / "state.sqlite").restore()
+    assert restored.halted is True
+    assert restored.halt_reason == "ws_stale"
+
+
+@pytest.mark.asyncio
+async def test_poll_fetch_fail_after_snapshot_trips_ws_stale(tmp_path: Path) -> None:
+    client = _PollBooksFailAfterFirst([_market()], _gap_books())
+    data_dir = tmp_path / "paper"
+    await run_paper(
+        client=client,
+        settings=_settings(),
+        project_root=tmp_path,
+        data_dir=data_dir,
+        once=False,
+        seconds=0.4,
         poll_s=0.05,
     )
     restored = StateStore(data_dir / "state.sqlite").restore()
