@@ -5,11 +5,13 @@ from __future__ import annotations
 import ast
 import inspect
 import json
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, get_args, get_origin, get_type_hints
 
-from arb.books import BookStore, Level, fillable_pair_size, walk_asks
+import pytest
+
+from arb.books import BookStore, Level, book_from_payload, fillable_pair_size, walk_asks
 from arb.money import d
 
 FIXTURES = Path(__file__).parent / "fixtures" / "books"
@@ -180,3 +182,57 @@ def test_book_helpers_never_use_float() -> None:
     except (TypeError, ValueError):
         return
     raise AssertionError("Level must reject float prices")
+
+
+def test_book_from_payload_empty_min_order_uses_previous_or_default() -> None:
+    previous = BookStore().apply_snapshot(
+        {
+            "token_id": "t",
+            "bids": [],
+            "asks": [{"price": "0.55", "size": "80"}],
+            "tick": "0.01",
+            "min_order_size": "1",
+            "ts_ms": 1000,
+        }
+    )
+    book = book_from_payload(
+        {
+            "token_id": "t",
+            "bids": [],
+            "asks": [{"price": "0.56", "size": "80"}],
+            "tick": "",
+            "min_order_size": "",
+            "ts_ms": 2000,
+        },
+        previous=previous,
+    )
+    assert book.min_order_size == Decimal("1")
+    assert book.tick == Decimal("0.01")
+    fresh = book_from_payload(
+        {
+            "token_id": "t2",
+            "bids": [],
+            "asks": [{"price": "0.56", "size": "80"}],
+            "tick": None,
+            "min_order_size": None,
+            "ts_ms": 2000,
+        }
+    )
+    assert fresh.min_order_size == Decimal("5")
+    assert fresh.tick == Decimal("0.01")
+
+
+def test_apply_snapshot_empty_price_still_raises() -> None:
+    store = BookStore()
+    with pytest.raises(InvalidOperation):
+        store.apply_snapshot(
+            {
+                "token_id": "t",
+                "bids": [],
+                "asks": [{"price": "", "size": "80"}],
+                "tick": "0.01",
+                "min_order_size": "5",
+                "ts_ms": 1000,
+            }
+        )
+    assert store.get("t") is None

@@ -10,6 +10,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from polymarket.models.clob.market_events import parse_market_event
+
 from arb.app import PublicApiError, StreamHeartbeat, reject_universe, run_paper
 from arb.config import Settings
 from arb.money import d
@@ -143,6 +145,55 @@ class _SilentStreamPublic(_MockPublic):
             while True:
                 await asyncio.sleep(60)
                 yield []
+
+        return gen()
+
+
+def _ws_book(token_id: str, bid: str, ask: str, *, min_order_size: str = "") -> object:
+    return parse_market_event(
+        {
+            "event_type": "book",
+            "market": "0x" + ("ab" * 32),
+            "asset_id": token_id,
+            "bids": [{"price": bid, "size": "20"}],
+            "asks": [{"price": ask, "size": "80"}],
+            "timestamp": "1710000000000",
+            "min_order_size": min_order_size,
+            "tick_size": "",
+            "hash": "ws-paper",
+        }
+    )
+
+
+class _WsNoneMinPublic(_MockPublic):
+    """REST books succeed; WS book events omit optional min_order_size."""
+
+    def subscribe(self, token_ids: list[str]):
+        async def gen():
+            yield _ws_book("yes-gap-3c", "0.54", "0.55")
+            yield _ws_book("no-gap-3c", "0.41", "0.42")
+
+        return gen()
+
+
+class _WsBadLevelPublic(_MockPublic):
+    """One WS book has an empty ask price after a good REST snapshot."""
+
+    def subscribe(self, token_ids: list[str]):
+        async def gen():
+            yield SimpleNamespace(
+                type="book",
+                payload=SimpleNamespace(
+                    token_id="yes-gap-3c",
+                    bids=(SimpleNamespace(price=d("0.54"), size=d("20")),),
+                    asks=(SimpleNamespace(price="", size=d("80")),),
+                    tick_size=d("0.01"),
+                    min_order_size=d("5"),
+                    timestamp=None,
+                    hash="bad-level",
+                    price_changes=(),
+                ),
+            )
 
         return gen()
 
@@ -312,6 +363,63 @@ async def test_poll_loop_old_book_ts_does_not_trip_ws_stale(tmp_path: Path) -> N
     restored = StateStore(data_dir / "state.sqlite").restore()
     assert restored.halted is False
     assert restored.halt_reason == ""
+
+
+@pytest.mark.asyncio
+async def test_ws_book_without_min_order_size_does_not_kill_paper_run(
+    tmp_path: Path,
+) -> None:
+    client = _WsNoneMinPublic(
+        [_market()],
+        {
+            "yes-gap-3c": _book("yes-gap-3c", "0.54", "0.55"),
+            "no-gap-3c": _book("no-gap-3c", "0.41", "0.42"),
+        },
+    )
+    data_dir = tmp_path / "paper"
+    stats = await run_paper(
+        client=client,
+        settings=_settings(),
+        project_root=tmp_path,
+        data_dir=data_dir,
+        once=False,
+        seconds=0.2,
+        poll_s=0.05,
+    )
+    restored = StateStore(data_dir / "state.sqlite").restore()
+    assert restored.halted is False
+    assert restored.halt_reason == ""
+    assert stats.universe == 1
+    assert stats.gaps >= 1
+    assert "invalid_book_update" not in stats.rejects
+
+
+@pytest.mark.asyncio
+async def test_ws_empty_ask_price_is_skipped_without_halt(tmp_path: Path) -> None:
+    client = _WsBadLevelPublic(
+        [_market()],
+        {
+            "yes-gap-3c": _book("yes-gap-3c", "0.54", "0.55"),
+            "no-gap-3c": _book("no-gap-3c", "0.41", "0.42"),
+        },
+    )
+    data_dir = tmp_path / "paper"
+    stats = await run_paper(
+        client=client,
+        settings=_settings(),
+        project_root=tmp_path,
+        data_dir=data_dir,
+        once=False,
+        seconds=0.2,
+        poll_s=0.05,
+    )
+    restored = StateStore(data_dir / "state.sqlite").restore()
+    assert restored.halted is False
+    assert restored.halt_reason == ""
+    assert stats.rejects.get("invalid_book_update", 0) >= 1
+    rejects = (data_dir / "rejects.jsonl").read_text(encoding="utf-8")
+    assert "invalid_book_update" in rejects
+    assert stats.gaps >= 1
 
 
 @pytest.mark.asyncio

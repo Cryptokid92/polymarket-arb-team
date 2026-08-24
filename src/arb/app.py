@@ -10,7 +10,7 @@ import re
 import time
 from collections.abc import AsyncIterator, Sequence
 from dataclasses import dataclass, field
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
 
@@ -232,14 +232,23 @@ def universe_pair(market: Any) -> UniversePair:
     )
 
 
+def _optional_decimal_str(value: object) -> str | None:
+    """Serialize an optional SDK decimal. Never stringify None/'' to 'None'."""
+    if value is None or value == "":
+        return None
+    return str(value)
+
+
 def orderbook_to_payload(book: Any, *, now_ms: int) -> dict[str, Any]:
     ts = getattr(book, "timestamp", None)
     if ts is not None and hasattr(ts, "timestamp"):
         ts_ms = int(ts.timestamp() * 1000)
     else:
         ts_ms = int(getattr(book, "ts_ms", now_ms) or now_ms)
-    tick = getattr(book, "tick_size", None) or getattr(book, "tick", Decimal("0.01"))
-    min_size = getattr(book, "min_order_size", Decimal("5"))
+    tick = getattr(book, "tick_size", None)
+    if tick is None or tick == "":
+        tick = getattr(book, "tick", None)
+    min_size = getattr(book, "min_order_size", None)
     return {
         "token_id": str(getattr(book, "token_id", "") or getattr(book, "asset_id", "")),
         "bids": [
@@ -250,8 +259,8 @@ def orderbook_to_payload(book: Any, *, now_ms: int) -> dict[str, Any]:
             {"price": str(level.price), "size": str(level.size)}
             for level in getattr(book, "asks", ()) or ()
         ],
-        "tick": str(tick),
-        "min_order_size": str(min_size),
+        "tick": _optional_decimal_str(tick),
+        "min_order_size": _optional_decimal_str(min_size),
         "ts_ms": ts_ms,
         "hash": getattr(book, "hash", None),
     }
@@ -494,7 +503,25 @@ async def run_paper(
         async for update in _updates(client, token_ids, poll_s):
             now_ms = _now_ms()
             heartbeat.mark(now_ms)
-            _apply_update(store, update, now_ms)
+            try:
+                _apply_update(store, update, now_ms)
+            except InvalidOperation as exc:
+                payload = getattr(update, "payload", update)
+                token = str(getattr(payload, "token_id", "") or "")
+                _append_jsonl(
+                    rejects_path,
+                    {
+                        "ts_ms": now_ms,
+                        "token_id": token,
+                        "reason": "invalid_book_update",
+                        "detail": f"{type(exc).__name__}: {exc}"[:200],
+                    },
+                )
+                _bump(stats, "invalid_book_update")
+                write_paper_stats(stats_path, stats)
+                if time.monotonic() >= deadline:
+                    return
+                continue
             seen: set[str] = set()
             if isinstance(update, (list, tuple)):
                 tokens = [str(getattr(book, "token_id", "")) for book in update]

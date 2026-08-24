@@ -18,4 +18,4 @@ First REST scan works. Then `subscribe(MarketSpec)` delivers a book event. `appl
 6. Regression — float refusal and adversary tests stay.
 
 ## After
-Debug report: exact field if found, smallest paper-only patch, test plan. PR only if proven. Do not merge.
+Debug report: [2026-08-24-cursor-6-agent-ws-decimal.md](../debug-reports/2026-08-24-cursor-6-agent-ws-decimal.md). Field proven (`min_order_size` → `"None"`). Paper-only patch on PR #15. Do not merge unless asked.
