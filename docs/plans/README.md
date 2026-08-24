@@ -12,5 +12,6 @@ Do not put live keys, `.env`, paper fills, or sqlite in this folder.
 | [grok-ws-age-fix.md](grok-ws-age-fix.md) | Grok Build 24 Aug 2026 | Kill-switch WS age is stream receive, not book `ts`. |
 | [cursor-review-ws-age.md](cursor-review-ws-age.md) | Cursor 24 Aug 2026 | Review `5010bbf` / merge if good. |
 | [cursor-debug-ws-decimal-6-agents.md](cursor-debug-ws-decimal-6-agents.md) | Cursor 24 Aug 2026 | Six-lane debug of the WS Decimal crash. |
+| [grok-how-this-bot-works.md](grok-how-this-bot-works.md) | Grok Build 24 Aug 2026 | Human guide: how this completeness-arb bot works. |
 
 Paper only. No `ALLOW_LIVE`.
