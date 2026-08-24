@@ -18,6 +18,7 @@ class RestoredState:
     daily_pnl: Decimal
     halted: bool
     halt_reason: str = ""
+    bankroll: Decimal | None = None
     client_order_ids: set[str] = field(default_factory=set)
 
 
@@ -90,6 +91,9 @@ class StateStore:
 
     def set_daily_pnl(self, pnl: Decimal) -> None:
         self._set_meta("daily_pnl", str(pnl))
+
+    def set_bankroll(self, bankroll: Decimal) -> None:
+        self._set_meta("bankroll", str(bankroll))
 
     def set_inventory(
         self, condition_id: str, yes_shares: Decimal, no_shares: Decimal
@@ -203,6 +207,7 @@ class StateStore:
                 "SELECT condition_id, yes_shares, no_shares FROM inventory"
             )
         }
+        raw_bankroll = self._get_meta("bankroll", "")
         return RestoredState(
             open_orders=open_orders,
             fills=fills,
@@ -210,5 +215,6 @@ class StateStore:
             daily_pnl=Decimal(self._get_meta("daily_pnl", "0")),
             halted=self._get_meta("halted", "0") == "1",
             halt_reason=self._get_meta("halt_reason", ""),
+            bankroll=Decimal(raw_bankroll) if raw_bankroll else None,
             client_order_ids={row["client_order_id"] for row in open_orders},
         )

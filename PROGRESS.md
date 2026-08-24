@@ -61,3 +61,8 @@ Paper batch-books + rotate watch (not Task 12): hour-6 `--all-markets` listed 50
 - Flags: `--book-batch-size`, `--watch-pairs`, `--watch-rotate-s`
 - `uv run pytest -q` — 158 passed
 - `ALLOW_LIVE` was not created. Live trading is not enabled. No secrets committed.
+
+Paper $500 bankroll + dashboard controls (not Task 12): paper-fill both legs at VWAPs, settle $1/share, persist bankroll/`daily_pnl`/fills. Local Start/Stop pause or exec `paper_run`. Watch-rotate slider 10–120s. Not real money. No `ALLOW_LIVE`.
+
+- `uv run pytest -q` — 185 passed
+- Plan: `docs/plans/cursor-paper-bankroll-pnl.md`

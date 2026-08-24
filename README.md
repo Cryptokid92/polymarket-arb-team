@@ -2,7 +2,7 @@
 
 Paper-first completeness arbitrage bot for [Polymarket](https://polymarket.com).
 
-This repository scaffolds a **paper-mode** specialist team that looks for completeness (YES + NO) mispricings. It is research and software infrastructure only.
+This repository scaffolds a **paper-mode** specialist team that looks for completeness (YES + NO) mispricings. It is research and software infrastructure only. Paper bankroll is **$500** and is **not real money**.
 
 **Not financial advice.** Nothing here is an offer, solicitation, or recommendation to trade. There is **no guaranteed PnL**. Markets can gap, quotes can go stale, and a half-filled arb is worse than no trade.
 
@@ -64,9 +64,10 @@ Writes gitignored JSONL (covered by `data/`):
 - `data/paper/gaps.jsonl` — hunter hits (edge, VWAPs, estimated maker/taker EV)
 - `data/paper/intents.jsonl` — paper-only approved intents (`PaperBroker`)
 - `data/paper/rejects.jsonl` — universe / risk / fee reject reasons
-- `data/paper/stats.json` — markets listed / universe / gap / intent / reject counts plus `heartbeat_ms` for the dashboard
+- `data/paper/stats.json` — markets listed / universe / gap / intent / reject counts plus `bankroll`, `daily_pnl`, `fills`, and `heartbeat_ms` for the dashboard
+- `data/paper/fills.jsonl` — paper fills and completeness PnL (not real money)
 
-`paper_ui.py` is read-only. If the JSONL files are missing it shows zeros and does not invent trades. Run status follows the newest JSONL timestamp, `stats.json` mtime, or `heartbeat_ms` — a live runner rewriting stats is **running**, not stale. Halt still comes only from `HALT` / sqlite. Banner: **PAPER MODE. Not live. Not financial advice.** Auto-refreshes every 2s.
+`paper_ui.py` shows paper bankroll, realized PnL (earned/lost), intents, and fills. If the JSONL files are missing it shows zeros and does not invent trades. Local Start/Stop pauses or launches `paper_run` (`ARB_MODE=paper`); the watch-rotate slider (10–120s) writes `control.json` and does not change risk caps. Data is GET; control POSTs are 127.0.0.1 only. Run status follows the newest JSONL timestamp, `stats.json` mtime, or `heartbeat_ms` — a live runner rewriting stats is **running**, not stale. Halt still comes only from `HALT` / sqlite. Banner: **PAPER MODE. Not live. Not financial advice.** Auto-refreshes every 2s. Paper $500 is not real money.
 
 `report_paper.py` prints: gaps seen, intents approved, estimated maker EV, estimated taker EV, reject reasons.
 

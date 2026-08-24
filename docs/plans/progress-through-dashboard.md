@@ -41,3 +41,5 @@ Paper dashboard (not Task 12): read-only local UI to watch paper runner logs.
 - Offline fixture tests under `tests/fixtures/paper_ui/`
 - `uv run pytest -q` — 110 passed
 - `ALLOW_LIVE` was not created. Live trading is not enabled. No secrets committed.
+
+Paper $500 bankroll + local Start/Stop / watch-rotate slider: see `docs/plans/cursor-paper-bankroll-pnl.md`. Not real money.

@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import sys
+from decimal import Decimal
 from pathlib import Path
 
 from polymarket import AsyncPublicClient
@@ -101,6 +102,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "0 disables rotation."
         ),
     )
+    parser.add_argument(
+        "--paper-bankroll",
+        default=None,
+        help="Paper bankroll in pUSD (default 500 via PAPER_BANKROLL). Not real money.",
+    )
     parser.add_argument("--data-dir", default="data/paper")
     parser.add_argument("--once", action="store_true", help="One list+book cycle, then exit")
     parser.add_argument(
@@ -126,6 +132,10 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     settings = load_settings()
+    if args.paper_bankroll is not None:
+        settings = settings.model_copy(
+            update={"paper_bankroll": Decimal(str(args.paper_bankroll))}
+        )
     project_root = Path.cwd()
     pre = run_preflight(settings, project_root)
     if not pre.ok:
@@ -165,6 +175,8 @@ async def _run(args: argparse.Namespace, settings, project_root: Path) -> int:
         f" gaps={stats.gaps}"
         f" intents={stats.intents}"
         f" rejects={stats.rejects}"
+        f" bankroll={stats.bankroll}"
+        f" daily_pnl={stats.daily_pnl}"
     )
     return 0
 

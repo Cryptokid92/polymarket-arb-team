@@ -26,12 +26,14 @@ def test_restore_round_trip_open_order_fill_inventory_pnl_halt(tmp_path: Path) -
     )
     store.set_inventory("0xmkt", d("10"), d("0"))
     store.set_daily_pnl(d("-1.25"))
+    store.set_bankroll(d("500.30"))
     store.set_halted(True, reason="ws_stale")
 
     restored = StateStore(path).restore()
     assert restored.halted is True
     assert restored.halt_reason == "ws_stale"
     assert restored.daily_pnl == d("-1.25")
+    assert restored.bankroll == d("500.30")
     assert restored.inventory["0xmkt"] == (d("10"), d("0"))
     assert "cid-yes-1" in restored.client_order_ids
     assert len(restored.open_orders) == 1
@@ -85,6 +87,14 @@ def test_restore_does_not_duplicate_open_pair_or_client_order_id(tmp_path: Path)
     after = again.restore()
     assert len(after.open_orders) == 2
     assert after.client_order_ids == {"cid-pair-yes", "cid-pair-no"}
+
+
+def test_missing_bankroll_meta_is_none(tmp_path: Path) -> None:
+    path = tmp_path / "state.sqlite"
+    store = StateStore(path)
+    restored = store.restore()
+    assert restored.bankroll is None
+    assert restored.daily_pnl == Decimal("0")
 
 
 def test_default_state_path_is_gitignored_sqlite() -> None:
