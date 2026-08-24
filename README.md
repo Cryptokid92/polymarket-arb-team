@@ -87,5 +87,6 @@ MIT © 2026 Nikolai Kirkhaug / Cryptokid92
 
 ## Plans and debug reports
 
+- [docs/guide/how-this-bot-works.md](docs/guide/how-this-bot-works.md) — how this completeness-arb bot works
 - [docs/plans/](docs/plans/) — Grok Build and Cursor plans
 - [docs/debug-reports/](docs/debug-reports/) — halt, crash, and review write-ups
