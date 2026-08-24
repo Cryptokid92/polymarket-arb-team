@@ -12,11 +12,14 @@ Protocol taker fee `C * feeRate * p * (1-p)`. Makers pay 0. Never include maker 
 
 ## Task 3 — Book store + ask walk — done
 
-Reconstruct YES/NO books from snapshots + `price_change` deltas. Walk ask depth (VWAP); do not size by mid or top-of-book only. Tests: `uv run pytest tests/test_books.py tests/test_fees.py tests/test_money.py -q`.
+Reconstruct YES/NO books from snapshots + `price_change` deltas. Walk ask depth (VWAP); do not size by mid or top-of-book only. Cursor: OK `2eaac20`.
+
+## Task 4 — Hunter
+
+Emit `GapFound` only for depth-sized ask gaps (`yes_vwap + no_vwap <= 1 - min_edge` and fillable >= min_size). Uses asks, never mids. Tests: `uv run pytest tests/test_hunter.py tests/test_books.py tests/test_fees.py tests/test_money.py -q`.
 
 ## Remaining (paper only)
 
-4. Hunter
 5. Risk agent
 6. Fee agent
 7. Paper executor + bus wiring

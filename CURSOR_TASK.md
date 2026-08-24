@@ -1,11 +1,11 @@
-# Cursor review — Task 3 only
+# Cursor review — Task 4 only
 
-Review the Task 3 book-store commit. Do not implement Tasks 4–12.
+Review the Task 4 hunter commit. Do not implement Tasks 5–12.
 
 ## Run
 
 ```bash
-uv run pytest tests/test_books.py tests/test_fees.py tests/test_money.py -q
+uv run pytest tests/test_hunter.py tests/test_books.py tests/test_fees.py tests/test_money.py -q
 ```
 
 ## Do not
@@ -18,10 +18,10 @@ uv run pytest tests/test_books.py tests/test_fees.py tests/test_money.py -q
 
 ## Check
 
-- Fixtures exist under `tests/fixtures/books/`: `gap_3c.json`, `thin_depth.json`, `no_gap.json`, `stale_one_side.json`, `delayed_market.json`.
-- `gap_3c`: fillable 80 and yes_vwap + no_vwap == 0.97.
-- `thin_depth`: 5¢ gap but only 3 shares vs min_order 5 → fillable 0.
-- `walk_asks` returns None when depth is insufficient.
-- `BookStore` applies snapshots and `price_change` deltas; ts/hash update.
-- Sizing walks the book (not mid / top-of-book only).
-- Decimal only; no float money.
+- `gap_3c.json` emits `GapFound` with fillable 80 and `raw_edge == 0.03`.
+- `no_gap.json` returns None.
+- Bid-only completeness (asks still sum >= `1 - min_edge`) returns None.
+- `book_age_ms` on `stale_one_side.json` uses the older book `ts_ms`.
+- Hunt sizes with `fillable_pair_size` + `walk_asks` on asks only — not bids or mids.
+- `raw_edge = 1 - yes_vwap - no_vwap` and is never rounded up.
+- Decimal only.
