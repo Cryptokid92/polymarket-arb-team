@@ -18,14 +18,16 @@ Task 8 is done (merged `13c0fa0`). Cursor: OK.
 
 Task 9 is done (merged `b67c958`). Cursor: OK.
 
-Task 10 is done: recorded-book backtest with adversarial lie detectors.
+Task 10 is done (merged `6d51143`). Cursor: OK.
 
-- `uv run pytest tests/test_backtest.py tests/test_adversary.py …` — 92 passed
-- Honest replay fills at ask VWAP, not mid; hedges sell into bids
-- `p_miss=1` fails the second FAK (naked incident, not a completed pair)
-- Vanished second ask before `t+latency` is not a completed pair
-- Crypto 50¢ books with a 2¢ gap are not profitable as taker after protocol fees
-- `detect_mid_fill` / `detect_lookahead` catch lying engines
-- `scripts/record_books.py` refuses `--place-orders` and does not call the network
+Task 11 is done: live-data paper runner that cannot place orders.
+
+- `uv run pytest -q` — 100 passed
+- Mock `list_markets` / books; pytest stays offline
+- `paper_run.py` source never contains `AsyncSecureClient`
+- Unreachable public API raises `PublicApiError` (no fake gaps)
+- Universe filter: binary, accepting, no delay, no neg-risk, no 5/15-minute crypto windows
+- `report_paper.py` prints gaps, intents, maker/taker EV, reject reasons
+- README documents a 1-hour paper run
 - `ALLOW_LIVE` was not created. Live trading is not enabled. No secrets committed.
-- Remaining: paper-only Task 11. Task 12 stays dark.
+- Remaining: Task 12 stays dark.

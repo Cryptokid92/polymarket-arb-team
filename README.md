@@ -23,17 +23,48 @@ cp .env.example .env
 # Fill local secrets in .env only. Never commit .env, keys, or wallets.
 
 uv sync
-uv run pytest tests/test_money.py -q
+uv run pytest -q
 ```
 
 `.env.example` documents the paper-mode keys. Leave `ARB_MODE=paper`. Relayer and wallet fields stay empty unless you are doing local paper work against your own account data.
+
+## Paper run (1 hour)
+
+Paper only. Reads **public** books. **Cannot place orders.** Never constructs a secure trading client.
+
+```bash
+# Leave ARB_MODE=paper. Do not create ALLOW_LIVE.
+uv run python scripts/paper_run.py --seconds 3600
+uv run python scripts/report_paper.py
+```
+
+`--place-orders` is rejected. If the public API is unreachable the runner exits with a clear error and does **not** fake gaps.
+
+Writes gitignored JSONL (covered by `data/`):
+
+- `data/paper/gaps.jsonl` — hunter hits (edge, VWAPs, estimated maker/taker EV)
+- `data/paper/intents.jsonl` — paper-only approved intents (`PaperBroker`)
+- `data/paper/rejects.jsonl` — universe / risk / fee reject reasons
+
+`report_paper.py` prints: gaps seen, intents approved, estimated maker EV, estimated taker EV, reject reasons.
+
+### Installed SDK notes (polymarket-client)
+
+These match the installed client in this repo. If they drift, follow the installed signatures:
+
+- `AsyncPublicClient.list_markets(closed=False, ...)` — paginator with `iter_items()`.
+- `get_order_books(token_ids=...)` — snapshot asks+bids+depth.
+- `subscribe(MarketSpec(token_ids=...))` **is** present. The runner subscribes to YES/NO token ids. If `subscribe` is missing on a future client, it polls `get_order_books` instead.
 
 ## Layout
 
 - `src/arb/money.py` — Decimal helpers (tick/size rounding down)
 - `src/arb/config.py` — paper-default settings and the live gate
+- `src/arb/app.py` — hunt → risk → fee pipeline and paper run loop
+- `scripts/paper_run.py` — networked paper runner (public client only)
+- `scripts/report_paper.py` — summarize a paper run
 - `AGENTS.md` — shared law for Grok / Cursor
-- `PLAN.md` — Task 1 done; remaining paper-only tasks
+- `PLAN.md` — Tasks 1–11 done; Task 12 stays dark
 
 ## License
 

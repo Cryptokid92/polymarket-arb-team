@@ -1,11 +1,11 @@
-# Cursor review — Task 10 only
+# Cursor review — Task 11 only (last paper task)
 
-Review the Task 10 recorder / backtest / adversary commit. Do not implement Tasks 11–12.
+Review the paper runner and the live gate. Do **not** implement Task 12. Do **not** create `ALLOW_LIVE`.
 
 ## Run
 
 ```bash
-uv run pytest tests/test_backtest.py tests/test_adversary.py tests/test_preflight.py tests/test_killswitch.py tests/test_state.py tests/test_merge.py tests/test_naked_leg.py tests/test_executor_paper.py tests/test_fee_agent.py tests/test_risk.py tests/test_hunter.py tests/test_books.py tests/test_fees.py tests/test_money.py -q
+uv run pytest -q
 ```
 
 ## Do not
@@ -13,20 +13,32 @@ uv run pytest tests/test_backtest.py tests/test_adversary.py tests/test_prefligh
 - Do not enable live trading.
 - Do not create `ALLOW_LIVE`.
 - Do not place live orders.
-- Do not call the network in default tests.
-- Do not import or construct `AsyncSecureClient`.
+- Do not construct `AsyncSecureClient`.
+- Do not call the live network in default tests.
 - Do not put an LLM in the hot path.
 - Do not commit secrets, `.env`, keys, paper fills, or state databases.
 
-## Check
+## Check — paper runner
 
-- Replay uses recorded asks+bids+depth. Never last-trade or mid as fill price.
-- `p_miss` (default 0.3) can fail the second FAK; maker fills are independent per side.
-- Taker path subtracts protocol fees. Naked legs pay configurable hedge slippage.
-- Report includes trades, completed_pairs, naked_incidents, net_pnl, capital_turns.
-- Feeding mids instead of asks makes `detect_mid_fill` fail (detector catches the lie).
-- Second ask gone before `t+latency` is not a completed pair.
-- Fee-on crypto 50¢ books with a 2¢ gap are not profitable as taker.
-- Hunter seeing `book[t+1]` at time `t` is a hard fail (`detect_lookahead`).
-- `scripts/record_books.py` refuses to place orders and does not call the network.
-- Synthetic recorded JSONL ships under `tests/fixtures/`.
+- `scripts/paper_run.py` imports `from polymarket import AsyncPublicClient` only.
+- Source never contains `AsyncSecureClient`.
+- `list_markets(closed=False)` (or the installed equivalent).
+- v1 universe: binary YES/NO, accepting orders, no `seconds_delay`, no neg-risk, no 5/15-minute crypto windows.
+- Subscribe via official SDK when available; otherwise poll `get_order_books` (document drift in README).
+- Pipeline is hunt → risk → fee → paper executor.
+- Writes gitignored `data/paper/intents.jsonl` and `data/paper/gaps.jsonl`.
+- Unreachable public API raises a clear error and does not fake gaps.
+- `--place-orders` is refused. `ARB_MODE=live` is refused.
+- Tests mock the public client (offline).
+
+## Check — live gate
+
+- `live_allowed()` is still false without a human `ALLOW_LIVE` dated today, and false when `ARB_MODE=paper`.
+- `LiveBroker` still raises without the dual gate.
+- Paper runner cannot place live orders.
+- No `ALLOW_LIVE` file in the repo.
+
+## Check — report / README
+
+- `scripts/report_paper.py` prints gaps seen, intents approved, estimated maker EV, estimated taker EV, reject reasons.
+- README documents a 1-hour paper run and `report_paper.py`.
