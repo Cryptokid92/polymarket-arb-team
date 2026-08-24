@@ -84,3 +84,8 @@ These match the installed client in this repo. If they drift, follow the install
 ## License
 
 MIT © 2026 Nikolai Kirkhaug / Cryptokid92
+
+## Plans and debug reports
+
+- [docs/plans/](docs/plans/) — Grok Build and Cursor plans
+- [docs/debug-reports/](docs/debug-reports/) — halt, crash, and review write-ups
