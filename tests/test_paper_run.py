@@ -397,6 +397,17 @@ async def test_paper_run_writes_gaps_and_intents_from_mock(tmp_path: Path) -> No
     assert "raw_edge" in gaps
     intents = (tmp_path / "paper" / "intents.jsonl").read_text(encoding="utf-8").strip()
     assert "maker_gtc" in intents
+    fills_path = tmp_path / "paper" / "fills.jsonl"
+    assert fills_path.is_file()
+    fill = json.loads(fills_path.read_text(encoding="utf-8").strip().splitlines()[0])
+    assert fill["path"] == "maker_gtc"
+    assert Decimal(fill["pnl"]) > Decimal("0")
+    assert Decimal(snapshot["bankroll"]) > Decimal("500")
+    assert Decimal(snapshot["daily_pnl"]) > Decimal("0")
+    restored = StateStore(tmp_path / "paper" / "state.sqlite").restore()
+    assert restored.bankroll is not None
+    assert restored.bankroll > Decimal("500")
+    assert len(restored.fills) == 2
 
 
 @pytest.mark.asyncio
@@ -1125,6 +1136,60 @@ async def test_quiet_ws_liveness_probe_is_batched(tmp_path: Path) -> None:
     assert client.book_calls > 3
 
 
+@pytest.mark.asyncio
+async def test_paused_control_skips_paper_fills(tmp_path: Path) -> None:
+    from arb.paper_control import PaperControl, write_control
+
+    data_dir = tmp_path / "paper"
+    data_dir.mkdir()
+    write_control(data_dir, PaperControl(paused=True))
+    client = _MockPublic(
+        [_market()],
+        {
+            "yes-gap-3c": _book("yes-gap-3c", "0.54", "0.55"),
+            "no-gap-3c": _book("no-gap-3c", "0.41", "0.42"),
+        },
+    )
+    stats = await run_paper(
+        client=client,
+        settings=_settings(),
+        project_root=tmp_path,
+        data_dir=data_dir,
+        once=True,
+    )
+    assert stats.intents == 0
+    assert stats.fills == 0
+    assert not (data_dir / "fills.jsonl").exists()
+    assert (data_dir / "intents.jsonl").exists() is False or (
+        data_dir / "intents.jsonl"
+    ).read_text(encoding="utf-8").strip() == ""
+
+
+@pytest.mark.asyncio
+async def test_insufficient_bankroll_rejects_without_negative(tmp_path: Path) -> None:
+    client = _MockPublic(
+        [_market()],
+        {
+            "yes-gap-3c": _book("yes-gap-3c", "0.54", "0.55"),
+            "no-gap-3c": _book("no-gap-3c", "0.41", "0.42"),
+        },
+    )
+    stats = await run_paper(
+        client=client,
+        settings=_settings(paper_bankroll=d("1")),
+        project_root=tmp_path,
+        data_dir=tmp_path / "paper",
+        once=True,
+    )
+    assert stats.intents == 0
+    assert stats.rejects.get("insufficient_bankroll", 0) >= 1
+    assert Decimal(str(stats.bankroll)) == d("1")
+    restored = StateStore(tmp_path / "paper" / "state.sqlite").restore()
+    assert restored.bankroll == d("1")
+    assert restored.daily_pnl == d("0")
+    assert restored.fills == []
+
+
 def test_paper_run_cli_batch_and_watch_flags() -> None:
     module = _load_script("paper_run_cli_batch", Path("scripts/paper_run.py"))
     args = module.parse_args([])
@@ -1137,6 +1202,8 @@ def test_paper_run_cli_batch_and_watch_flags() -> None:
     assert args.book_batch_size == 25
     assert args.watch_pairs == 10
     assert args.watch_rotate_s == 30.0
+    args = module.parse_args(["--paper-bankroll", "500"])
+    assert args.paper_bankroll == "500"
     source = Path("scripts/paper_run.py").read_text(encoding="utf-8")
     assert "--book-batch-size" in source
     assert "--watch-pairs" in source

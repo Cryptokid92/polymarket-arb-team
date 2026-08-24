@@ -20,6 +20,15 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
+from arb.paper_control import (
+    ROTATE_DEFAULT_S,
+    ROTATE_MAX_S,
+    ROTATE_MIN_S,
+    apply_control,
+    read_control,
+    runner_is_alive,
+)
+
 BANNER = "PAPER MODE. Not live. Not financial advice."
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8765
@@ -27,7 +36,13 @@ DEFAULT_DATA_DIR = "data/paper"
 RECENT_LIMIT = 20
 RUNNING_AGE_MS = 10_000
 RECENT_AGE_MS = 60_000
-LOG_NAMES = ("gaps.jsonl", "intents.jsonl", "rejects.jsonl", "stats.json")
+LOG_NAMES = (
+    "gaps.jsonl",
+    "intents.jsonl",
+    "rejects.jsonl",
+    "fills.jsonl",
+    "stats.json",
+)
 
 
 def read_jsonl(path: Path) -> list[dict[str, Any]]:
@@ -89,6 +104,25 @@ def _row_ts_ms(row: dict[str, Any]) -> int | None:
         return int(raw)
     except (TypeError, ValueError):
         return None
+
+
+def _sqlite_meta(path: Path, key: str) -> str | None:
+    if not path.is_file():
+        return None
+    uri = f"file:{path.resolve().as_posix()}?mode=ro"
+    try:
+        conn = sqlite3.connect(uri, uri=True)
+    except sqlite3.Error:
+        return None
+    try:
+        row = conn.execute("SELECT value FROM meta WHERE key = ?", (key,)).fetchone()
+    except sqlite3.Error:
+        return None
+    finally:
+        conn.close()
+    if row is None or row[0] in (None, ""):
+        return None
+    return str(row[0])
 
 
 def _sqlite_halt_info(path: Path) -> tuple[bool | None, str | None]:
@@ -217,6 +251,26 @@ def _recent_gaps(rows: list[dict[str, Any]], limit: int) -> list[dict[str, Any]]
     return out
 
 
+def _recent_fills(rows: list[dict[str, Any]], limit: int) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    for row in rows[-limit:]:
+        out.append(
+            {
+                "ts_ms": row.get("ts_ms"),
+                "path": row.get("path"),
+                "size": row.get("size"),
+                "yes_vwap": row.get("yes_vwap"),
+                "no_vwap": row.get("no_vwap"),
+                "pair_fees": row.get("pair_fees"),
+                "cost": row.get("cost"),
+                "pnl": row.get("pnl"),
+                "bankroll": row.get("bankroll"),
+            }
+        )
+    out.reverse()
+    return out
+
+
 def _recent_intents(rows: list[dict[str, Any]], limit: int) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
     for row in rows[-limit:]:
@@ -246,28 +300,48 @@ def summarize_dashboard(
     gaps = read_jsonl(data_dir / "gaps.jsonl")
     intents = read_jsonl(data_dir / "intents.jsonl")
     rejects = read_jsonl(data_dir / "rejects.jsonl")
+    fills = read_jsonl(data_dir / "fills.jsonl")
     stats = read_stats_file(data_dir / "stats.json")
+    control = read_control(data_dir)
 
     jsonl_gaps = len(gaps)
     jsonl_intents = len(intents)
     jsonl_rejects = len(rejects)
+    jsonl_fills = len(fills)
     reasons = Counter(str(row.get("reason", "unknown")) for row in rejects)
 
     markets_listed = 0
     universe = 0
+    bankroll = "500"
+    daily_pnl = "0"
     if stats is not None:
         markets_listed = _int_or_zero(stats.get("markets_listed"))
         universe = _int_or_zero(stats.get("universe"))
         jsonl_gaps = max(jsonl_gaps, _int_or_zero(stats.get("gaps")))
         jsonl_intents = max(jsonl_intents, _int_or_zero(stats.get("intents")))
         jsonl_rejects = max(jsonl_rejects, _int_or_zero(stats.get("rejects")))
+        jsonl_fills = max(jsonl_fills, _int_or_zero(stats.get("fills")))
         extra = stats.get("reject_reasons")
         if isinstance(extra, dict) and not reasons:
             for key, value in extra.items():
                 reasons[str(key)] += _int_or_zero(value)
+        if stats.get("bankroll") is not None:
+            bankroll = str(stats.get("bankroll"))
+        if stats.get("daily_pnl") is not None:
+            daily_pnl = str(stats.get("daily_pnl"))
+
+    sqlite_path = data_dir / "state.sqlite"
+    sqlite_bankroll = _sqlite_meta(sqlite_path, "bankroll")
+    sqlite_pnl = _sqlite_meta(sqlite_path, "daily_pnl")
+    if stats is None or stats.get("bankroll") is None:
+        if sqlite_bankroll is not None:
+            bankroll = sqlite_bankroll
+    if stats is None or stats.get("daily_pnl") is None:
+        if sqlite_pnl is not None:
+            daily_pnl = sqlite_pnl
 
     last_ts: int | None = None
-    for rows in (gaps, intents, rejects):
+    for rows in (gaps, intents, rejects, fills):
         for row in rows:
             ts = _row_ts_ms(row)
             if ts is not None and (last_ts is None or ts > last_ts):
@@ -287,10 +361,17 @@ def summarize_dashboard(
     else:
         last_event_age_ms = None
 
+    run_status = _infer_run_status(last_event_age_ms)
+    if control.paused:
+        run_status = "paused"
+
+    rotate_s = (
+        control.rotate_s if control.rotate_s is not None else ROTATE_DEFAULT_S
+    )
     return {
         "banner": BANNER,
         "mode": "paper",
-        "run_status": _infer_run_status(last_event_age_ms),
+        "run_status": run_status,
         "last_event_age_ms": last_event_age_ms,
         "last_log_mtime_ms": last_mtime,
         "heartbeat_ms": heartbeat_ms,
@@ -300,10 +381,23 @@ def summarize_dashboard(
             "gaps": jsonl_gaps,
             "intents": jsonl_intents,
             "rejects": jsonl_rejects,
+            "fills": jsonl_fills,
+        },
+        "paper": {
+            "bankroll": bankroll,
+            "daily_pnl": daily_pnl,
+        },
+        "control": {
+            "paused": control.paused,
+            "rotate_s": rotate_s,
+            "rotate_min_s": ROTATE_MIN_S,
+            "rotate_max_s": ROTATE_MAX_S,
+            "runner_alive": runner_is_alive(data_dir),
         },
         "reject_reasons": dict(sorted(reasons.items())),
         "recent_gaps": _recent_gaps(gaps, recent_limit),
         "recent_intents": _recent_intents(intents, recent_limit),
+        "recent_fills": _recent_fills(fills, recent_limit),
         "halt": read_halt(data_dir, root),
     }
 
@@ -346,8 +440,18 @@ def _rows_html(rows: list[dict[str, Any]], columns: list[tuple[str, str]]) -> st
 
 def render_html(summary: dict[str, Any]) -> str:
     counts = summary["counts"]
+    paper = summary.get("paper") or {}
+    control = summary.get("control") or {}
     halt = summary["halt"]
     reasons = summary["reject_reasons"]
+    bankroll = paper.get("bankroll", "500")
+    daily_pnl = str(paper.get("daily_pnl", "0"))
+    pnl_lost = daily_pnl.startswith("-")
+    pnl_label = "lost" if pnl_lost else "earned"
+    pnl_class = "lost" if pnl_lost else "earned"
+    rotate_s = control.get("rotate_s", ROTATE_DEFAULT_S)
+    paused = bool(control.get("paused"))
+    runner_alive = "yes" if control.get("runner_alive") else "no"
     reason_rows = (
         "".join(
             f"<tr><td>{_esc(reason)}</td><td>{_esc(count)}</td></tr>"
@@ -383,7 +487,11 @@ def render_html(summary: dict[str, Any]) -> str:
     .card .n {{ font-size: 28px; }}
     .status {{ margin: 12px 0; }}
     .ok {{ color: #8d8; }}
+    .earned {{ color: #8d8; }}
+    .lost {{ color: #f88; }}
     .halted {{ color: #f88; font-weight: 700; }}
+    .controls button {{ margin-right: 8px; padding: 6px 12px; }}
+    .controls input[type="range"] {{ width: 220px; vertical-align: middle; }}
     table {{ width: 100%; border-collapse: collapse; background: #1b1b1b; }}
     th, td {{ text-align: left; padding: 6px 8px; border-bottom: 1px solid #333; }}
     th {{ color: #aaa; font-weight: 600; }}
@@ -402,6 +510,28 @@ def render_html(summary: dict[str, Any]) -> str:
       · HALT file: {halt_file_bit}
       · sqlite: {sqlite_bit}
       · sources: {_esc(sources)}
+    </div>
+    <h2>Paper bankroll (not real money)</h2>
+    <div class="grid">
+      <div class="card">paper bankroll<div class="n">{_esc(bankroll)}</div></div>
+      <div class="card">realized PnL ({pnl_label})<div class="n {pnl_class}">{_esc(daily_pnl)}</div></div>
+      <div class="card">fills<div class="n">{_esc(counts.get("fills", 0))}</div></div>
+      <div class="card">paused<div class="n">{_esc("yes" if paused else "no")}</div></div>
+      <div class="card">runner<div class="n">{_esc(runner_alive)}</div></div>
+    </div>
+    <h2>Paper controls (127.0.0.1 only)</h2>
+    <div class="controls">
+      <button type="button" id="btn-start">Start</button>
+      <button type="button" id="btn-stop">Stop</button>
+      <label>Watch rotate
+        <input type="range" id="rotate" min="{ROTATE_MIN_S}" max="{ROTATE_MAX_S}"
+               value="{_esc(rotate_s)}">
+        <span id="rotate-val">{_esc(rotate_s)}s</span>
+      </label>
+      <p class="empty">Start/Stop pauses or launches paper_run (ARB_MODE=paper).
+      Slider is watch-slice interval ({ROTATE_MIN_S}–{ROTATE_MAX_S}s). Does not
+      change stale_ms, min_edge, max_gap, universe filters, or bankroll rules.
+      Stop does not place or cancel live orders.</p>
     </div>
     <h2>Counts</h2>
     <div class="grid">
@@ -423,6 +553,16 @@ def render_html(summary: dict[str, Any]) -> str:
         ("age", "age"),
         ("condition_id", "condition_id"),
     ])}
+    <h2>Recent fills</h2>
+    {_rows_html(summary.get("recent_fills") or [], [
+        ("path", "path"),
+        ("size", "size"),
+        ("pnl", "pnl"),
+        ("cost", "cost"),
+        ("yes_vwap", "yes_vwap"),
+        ("no_vwap", "no_vwap"),
+        ("pair_fees", "pair_fees"),
+    ])}
     <h2>Recent intents</h2>
     {_rows_html(summary["recent_intents"], [
         ("path", "path"),
@@ -430,13 +570,40 @@ def render_html(summary: dict[str, Any]) -> str:
         ("expected_net_edge", "expected_net_edge"),
     ])}
   </main>
-  <footer>Read-only. Binds 127.0.0.1. Auto-refresh 2s. No orders. No live path.</footer>
+  <footer>Paper $500 bankroll is not real money. Binds 127.0.0.1. Auto-refresh 2s. No live path.</footer>
+  <script>
+    async function postControl(body) {{
+      await fetch("/api/control", {{
+        method: "POST",
+        headers: {{"Content-Type": "application/json"}},
+        body: JSON.stringify(body)
+      }});
+      location.reload();
+    }}
+    document.getElementById("btn-start").onclick = function () {{
+      postControl({{action: "start"}});
+    }};
+    document.getElementById("btn-stop").onclick = function () {{
+      postControl({{action: "stop"}});
+    }};
+    var slider = document.getElementById("rotate");
+    var label = document.getElementById("rotate-val");
+    slider.oninput = function () {{ label.textContent = slider.value + "s"; }};
+    slider.onchange = function () {{
+      postControl({{action: "rotate", rotate_s: Number(slider.value)}});
+    }};
+  </script>
 </body>
 </html>
 """
 
 
-def make_handler(data_dir: Path, project_root: Path) -> type[BaseHTTPRequestHandler]:
+def make_handler(
+    data_dir: Path,
+    project_root: Path,
+    *,
+    spawn=None,
+) -> type[BaseHTTPRequestHandler]:
     class PaperUIHandler(BaseHTTPRequestHandler):
         def _send(self, code: int, body: bytes, content_type: str) -> None:
             self.send_response(code)
@@ -459,7 +626,29 @@ def make_handler(data_dir: Path, project_root: Path) -> type[BaseHTTPRequestHand
             self._send(404, b"not found\n", "text/plain; charset=utf-8")
 
         def do_POST(self) -> None:  # noqa: N802
-            self._send(405, b"read-only\n", "text/plain; charset=utf-8")
+            path = urlparse(self.path).path
+            if path != "/api/control":
+                self._send(405, b"read-only\n", "text/plain; charset=utf-8")
+                return
+            length = int(self.headers.get("Content-Length", "0") or 0)
+            raw = self.rfile.read(length) if length else b"{}"
+            try:
+                body = json.loads(raw.decode("utf-8") or "{}")
+            except json.JSONDecodeError:
+                self._send(400, b"bad json\n", "text/plain; charset=utf-8")
+                return
+            if not isinstance(body, dict):
+                self._send(400, b"bad json\n", "text/plain; charset=utf-8")
+                return
+            result = apply_control(
+                data_dir,
+                action=str(body.get("action") or ""),
+                rotate_s=body.get("rotate_s"),
+                project_root=project_root,
+                spawn=spawn,
+            )
+            payload = json.dumps(result, separators=(",", ":")).encode("utf-8")
+            self._send(200, payload, "application/json; charset=utf-8")
 
         def log_message(self, fmt: str, *args: object) -> None:
             sys.stderr.write("paper_ui: " + (fmt % args) + "\n")

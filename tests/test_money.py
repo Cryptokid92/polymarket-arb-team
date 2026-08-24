@@ -78,12 +78,25 @@ def test_default_arb_mode_is_paper() -> None:
         ws_stale_ms=3000,
     )
     assert settings.arb_mode == "paper"
+    assert settings.paper_bankroll == Decimal("500")
+
+
+def test_paper_bankroll_env(monkeypatch) -> None:
+    monkeypatch.setenv("PAPER_BANKROLL", "250")
+    settings = load_settings()
+    assert settings.paper_bankroll == Decimal("250")
+    assert settings.max_notional_per_trade == Decimal("25")
+    assert settings.min_edge == Decimal("0.01")
+    assert settings.max_gap == Decimal("0.08")
+    assert settings.stale_ms == 400
 
 
 def test_load_settings_defaults_to_paper(monkeypatch) -> None:
     monkeypatch.delenv("ARB_MODE", raising=False)
+    monkeypatch.delenv("PAPER_BANKROLL", raising=False)
     settings = load_settings()
     assert settings.arb_mode == "paper"
+    assert settings.paper_bankroll == Decimal("500")
 
 
 def test_live_allowed_false_without_allow_live(tmp_path: Path, monkeypatch) -> None:

@@ -7,6 +7,7 @@ import shutil
 import sqlite3
 import threading
 from http.client import HTTPConnection
+from decimal import Decimal
 from pathlib import Path
 
 from arb.app import PaperRunStats, write_paper_stats
@@ -54,7 +55,12 @@ def test_summarize_fixture_counts(tmp_path: Path) -> None:
         "gaps": 2,
         "intents": 2,
         "rejects": 4,
+        "fills": 0,
     }
+    assert summary["paper"]["bankroll"] == "500"
+    assert summary["paper"]["daily_pnl"] == "0"
+    assert summary["recent_fills"] == []
+    assert summary["control"]["rotate_s"] == 90
     assert summary["reject_reasons"] == {
         "neg_risk": 1,
         "short_crypto_window": 1,
@@ -87,10 +93,14 @@ def test_missing_logs_are_zeros_not_invented(tmp_path: Path) -> None:
         "gaps": 0,
         "intents": 0,
         "rejects": 0,
+        "fills": 0,
     }
     assert summary["reject_reasons"] == {}
     assert summary["recent_gaps"] == []
     assert summary["recent_intents"] == []
+    assert summary["recent_fills"] == []
+    assert summary["paper"]["bankroll"] == "500"
+    assert summary["paper"]["daily_pnl"] == "0"
     assert summary["run_status"] == "no_data"
     assert summary["heartbeat_ms"] is None
     assert summary["halt"]["halted"] is False
@@ -158,6 +168,11 @@ def test_html_banner_and_refresh() -> None:
     assert "maker_gtc" in page
     assert "taker_fak" in page
     assert "0.03" in page
+    assert "paper bankroll" in page
+    assert "btn-start" in page
+    assert "btn-stop" in page
+    assert "Watch rotate" in page
+    assert "not real money" in page.lower() or "Not real money" in page
 
 
 def test_http_is_readonly_and_local() -> None:
@@ -224,6 +239,9 @@ def test_write_paper_stats_has_no_account_fields(tmp_path: Path) -> None:
         "rejects": 2,
         "reject_reasons": {"stale": 2},
         "watching": 0,
+        "bankroll": "500",
+        "daily_pnl": "0",
+        "fills": 0,
         "heartbeat_ms": 1_700_000_000_123,
     }
     blob = path.read_text(encoding="utf-8")
@@ -355,3 +373,120 @@ def test_halt_file_still_wins_when_stats_are_fresh(tmp_path: Path) -> None:
     assert summary["last_event_age_ms"] == 2_000
     assert summary["halt"]["halted"] is True
     assert summary["halt"]["halt_file"] is True
+
+
+def test_dashboard_reads_bankroll_pnl_and_fills(tmp_path: Path) -> None:
+    ui = _load_script()
+    paper = tmp_path / "paper"
+    paper.mkdir()
+    write_paper_stats(
+        paper / "stats.json",
+        PaperRunStats(
+            markets_listed=4,
+            universe=2,
+            gaps=1,
+            intents=1,
+            bankroll=Decimal("500.30"),
+            daily_pnl=Decimal("0.30"),
+            fills=1,
+        ),
+        now_ms=1_700_000_000_500,
+    )
+    (paper / "fills.jsonl").write_text(
+        json.dumps(
+            {
+                "ts_ms": 1_700_000_000_400,
+                "path": "maker_gtc",
+                "size": "10",
+                "yes_vwap": "0.55",
+                "no_vwap": "0.42",
+                "pair_fees": "0",
+                "cost": "9.70",
+                "pnl": "0.30",
+                "bankroll": "500.30",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    summary = ui.summarize_dashboard(paper, project_root=tmp_path, now_ms=1_700_000_000_500)
+    assert summary["paper"]["bankroll"] == "500.30"
+    assert summary["paper"]["daily_pnl"] == "0.30"
+    assert summary["counts"]["fills"] == 1
+    assert summary["recent_fills"][0]["pnl"] == "0.30"
+    page = ui.render_html(summary)
+    assert "500.30" in page
+    assert "earned" in page
+
+
+def test_http_control_stop_and_slider(tmp_path: Path) -> None:
+    ui = _load_script()
+    paper = tmp_path / "paper"
+    paper.mkdir()
+    spawned: list[tuple[object, object]] = []
+
+    def spawn(root, data_dir) -> None:
+        spawned.append((root, data_dir))
+
+    handler = ui.make_handler(paper, tmp_path, spawn=spawn)
+    server = ui.ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    host, port = server.server_address[:2]
+    try:
+        conn = HTTPConnection(host, port, timeout=2)
+        conn.request(
+            "POST",
+            "/api/control",
+            body=json.dumps({"action": "stop"}),
+            headers={"Content-Type": "application/json"},
+        )
+        stopped = json.loads(conn.getresponse().read().decode("utf-8"))
+        conn.close()
+        assert stopped["ok"] is True
+        assert stopped["paused"] is True
+        assert spawned == []
+
+        conn = HTTPConnection(host, port, timeout=2)
+        conn.request(
+            "POST",
+            "/api/control",
+            body=json.dumps({"action": "rotate", "rotate_s": 30}),
+            headers={"Content-Type": "application/json"},
+        )
+        rotated = json.loads(conn.getresponse().read().decode("utf-8"))
+        conn.close()
+        assert rotated["ok"] is True
+        assert rotated["rotate_s"] == 30
+        control = json.loads((paper / "control.json").read_text(encoding="utf-8"))
+        assert control["rotate_s"] == 30
+        assert "stale_ms" not in control
+
+        conn = HTTPConnection(host, port, timeout=2)
+        conn.request(
+            "POST",
+            "/api/control",
+            body=json.dumps({"action": "start"}),
+            headers={"Content-Type": "application/json"},
+        )
+        started = json.loads(conn.getresponse().read().decode("utf-8"))
+        conn.close()
+        assert started["ok"] is True
+        assert started["paused"] is False
+        assert started["started"] is True
+        assert spawned == [(tmp_path, paper)]
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+
+def test_paused_control_sets_run_status(tmp_path: Path) -> None:
+    ui = _load_script()
+    paper = tmp_path / "paper"
+    paper.mkdir()
+    (paper / "control.json").write_text('{"paused": true, "rotate_s": 20}\n', encoding="utf-8")
+    write_paper_stats(paper / "stats.json", PaperRunStats(), now_ms=1_700_000_000_100)
+    summary = ui.summarize_dashboard(paper, project_root=tmp_path, now_ms=1_700_000_000_200)
+    assert summary["run_status"] == "paused"
+    assert summary["control"]["rotate_s"] == 20

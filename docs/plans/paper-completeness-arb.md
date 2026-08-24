@@ -50,7 +50,7 @@ Tests: `uv run pytest -q`.
 
 ## Paper dashboard (not Task 12) — done
 
-Read-only local UI (`scripts/paper_ui.py`, stdlib `http.server`) watches gitignored paper JSONL + optional `stats.json` / sqlite under `--data-dir` (default `data/paper`). Banner is paper-only. Binds `127.0.0.1:8765`. Missing logs show zeros. Never places orders. Not Task 12.
+Read-only local UI (`scripts/paper_ui.py`, stdlib `http.server`) watches gitignored paper JSONL + optional `stats.json` / sqlite under `--data-dir` (default `data/paper`). Banner is paper-only. Binds `127.0.0.1:8765`. Missing logs show zeros. Paper $500 bankroll, realized PnL, Start/Stop, watch-rotate slider. Never places live orders. Not Task 12.
 
 ## Remaining
 

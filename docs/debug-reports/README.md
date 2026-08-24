@@ -13,4 +13,5 @@ Do not commit paper JSONL, sqlite, `.env`, or keys.
 | [2026-08-24-cursor-6-agent-ws-decimal.md](2026-08-24-cursor-6-agent-ws-decimal.md) | After 6-lane debug | Exact field `min_order_size` → `"None"`. PR #15. |
 | [2026-08-24-hour4-quiet-ws-stale.md](2026-08-24-hour4-quiet-ws-stale.md) | Hour-4 halt | Quiet live WS ≠ dead socket. |
 | [2026-08-24-ui-stale-while-running.md](2026-08-24-ui-stale-while-running.md) | Hour-5 UI | Runner up, stats rewriting, UI said stale 11m. |
+| [2026-08-24-paper-bankroll-pnl.md](2026-08-24-paper-bankroll-pnl.md) | Paper bankroll | $500 paper fills/PnL + local Start/Stop / rotate slider. |
 | [2026-08-24-hour6-payload-limit.md](2026-08-24-hour6-payload-limit.md) | Hour-6 crash | Fat `get_order_books` (~3080 ids) exceeded payload. |

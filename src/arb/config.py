@@ -21,6 +21,7 @@ class Settings(BaseModel):
     stale_ms: int
     hedge_timeout_ms: int
     ws_stale_ms: int
+    paper_bankroll: Decimal = Decimal("500")
     private_key: str | None = None
     wallet_address: str | None = None
 
@@ -71,6 +72,10 @@ class _EnvSettings(BaseSettings):
     ws_stale_ms: int = Field(
         default=3000,
         validation_alias=AliasChoices("WS_STALE_MS", "ws_stale_ms"),
+    )
+    paper_bankroll: Decimal = Field(
+        default=Decimal("500"),
+        validation_alias=AliasChoices("PAPER_BANKROLL", "paper_bankroll"),
     )
     private_key: str | None = Field(
         default=None,

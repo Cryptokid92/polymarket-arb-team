@@ -45,10 +45,11 @@ One Python process. Specialists are functions, not separate services. There is a
 5. **Risk.** `approve()` may clip size to `max_notional_per_trade` and re-walk both sides. Refusal reasons below.
 6. **Fees / intent.** `choose_intent()` prefers maker GTC. Taker FAK only if EV is still positive after protocol fees plus a `0.005`/share buffer.
 7. **Paper executor.** `PaperBroker` writes a YES buy and a NO buy to JSONL with status `paper_posted`. No network. No CLOB order.
+8. **Paper fill + settlement.** Both legs fill at the gap VWAPs against a **$500 paper bankroll** (not real money). Taker FAK subtracts protocol pair fees; makers pay 0. A completed pair is worth $1/share. PnL updates `daily_pnl` and remaining bankroll. Cost above remaining bankroll is `insufficient_bankroll`. Paper merge (`maybe_merge`) is wired here. Live merge is Task 12.
 
-`scripts/paper_run.py` is that loop. `--place-orders` is rejected.
+`scripts/paper_run.py` is that loop. `--place-orders` is rejected. `--paper-bankroll` / `PAPER_BANKROLL` defaults to 500.
 
-Merge and naked-leg hedge exist as paper helpers (`arb.merge`, `arb.naked_leg`): paper merge is `min(yes, no)` with no network; leftover size after timeout is a paper FAK sell (`incident=True`). The networked paper runner does not call them. It logs intents and increments `open_pairs`. It does not simulate fills, merge, or PnL. Live merge is Task 12.
+Merge and naked-leg hedge exist as paper helpers (`arb.merge`, `arb.naked_leg`): paper merge is `min(yes, no)` with no network; leftover size after timeout is a paper FAK sell (`incident=True`). The networked paper runner now paper-fills both legs and calls paper merge for completeness settlement. Live merge is Task 12.
 
 ## Fees
 
@@ -109,7 +110,7 @@ It trips on:
 
 Paper halt only sets the flag. Live `cancel_all` is Task 12.
 
-The paper runner does wire halt-file and WS-silence into this loop. It starts `daily_pnl` at 0 and does not write hedge incidents, because it does not simulate fills.
+The paper runner wires halt-file and WS-silence into this loop. It restores `daily_pnl` / paper bankroll from sqlite (default bankroll 500) and updates them on paper fills. It does not write hedge incidents on a complete pair fill.
 
 ## Paper logs and UI
 
@@ -142,10 +143,12 @@ Logs are gitignored under `data/` (default `data/paper/`):
 - `gaps.jsonl` — hunter hits (edge, VWAPs, estimated maker/taker EV, optional reject reason)
 - `intents.jsonl` — paper-only approved intents (`PaperBroker`)
 - `rejects.jsonl` — universe / risk / fee reasons
-- `stats.json` — listed / universe / gap / intent / reject counts for the dashboard
-- `state.sqlite` — halt flag, halt reason, hedge incidents (path injectable)
+- `stats.json` — listed / universe / gap / intent / reject / fill counts, `bankroll`, `daily_pnl`, `heartbeat_ms`
+- `fills.jsonl` — paper fills and completeness PnL
+- `control.json` — local pause + watch-rotate interval (10–120s)
+- `state.sqlite` — halt flag, halt reason, paper fills, bankroll, daily_pnl (path injectable)
 
-`paper_ui.py` is read-only stdlib `http.server`. Binds `127.0.0.1:8765`. Banner: **PAPER MODE. Not live. Not financial advice.** Auto-refresh every 2s. Missing logs show zeros. It does not invent trades. Hosts other than localhost are refused.
+`paper_ui.py` is stdlib `http.server`. Binds `127.0.0.1:8765`. Banner: **PAPER MODE. Not live. Not financial advice.** Auto-refresh every 2s. Shows paper bankroll, earned/lost, intents, fills. Local Start/Stop and the watch-rotate slider are POSTs to `/api/control` only. Missing logs show zeros. It does not invent trades. Hosts other than localhost are refused. Paper $500 is not real money.
 
 `report_paper.py` prints gaps seen, intents approved, estimated maker EV, estimated taker EV, reject reasons, and halt reason if sqlite has one.
 

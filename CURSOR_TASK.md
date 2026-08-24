@@ -1,48 +1,28 @@
-# Cursor review — batch books + rotate watch slice (not Task 12)
+# Cursor review — paper bankroll, PnL, local controls (not Task 12)
 
-Review the paper book-batch and watch-slice work. Do **not** implement Task 12. Do **not** create `ALLOW_LIVE`.
+Review the paper $500 bankroll + dashboard control work. Do **not** implement Task 12. Do **not** create `ALLOW_LIVE`.
 
-## Run
+Paper only. Never place live orders. Never construct a trading client in the UI. Do not loosen universe/risk.
 
-```bash
-uv run pytest -q
-```
+## Check — bankroll and settlement
 
-## Do not
+- Default paper bankroll is `Decimal("500")` (`PAPER_BANKROLL` / `--paper-bankroll`).
+- `max_notional_per_trade` still clips size. Caps unchanged.
+- Successful intents paper-fill both legs at VWAPs. Taker fees via existing helpers. Makers 0. No rebate.
+- Completeness: $1/share. PnL = size * (1 - yes_vwap - no_vwap) - pair_fees.
+- Refuse `insufficient_bankroll` when cost > remaining bankroll. Do not go negative silently.
+- sqlite under the data dir holds fills / `daily_pnl` / bankroll. No secrets.
 
-- Do not enable live trading.
-- Do not create `ALLOW_LIVE`.
-- Do not place live orders.
-- Do not construct `AsyncSecureClient`.
-- Do not call the live network in default tests.
-- Do not put an LLM in the hot path.
-- Do not commit secrets, `.env`, keys, paper fills, `data/`, sqlite, or paper JSONL with account data.
-- Do not loosen universe or risk: still refuse neg-risk, delay, non-binary, short crypto windows, `stale_ms`, `min_edge`, `max_gap`.
-- Do not raise `LIST_SAFETY_CAP` as the payload-limit “fix”.
+## Check — stats + UI
 
-## Check — batched books
+- `write_paper_stats` includes `bankroll` and `daily_pnl` (heartbeat still works).
+- Dashboard shows bankroll, earned/lost, intents, fills. Banner PAPER MODE.
+- Start/Stop: pause/resume control file; Start execs `paper_run` if no pid. Stop does not cancel live orders.
+- Slider writes watch-rotate 10–120s. Does not change `stale_ms`, `min_edge`, `max_gap`, universe filters, or bankroll rules.
+- GET for data. Control POST local-only. No new web deps.
 
-- REST `get_order_books` is called in batches (`BOOK_BATCH_SIZE = 50` token ids). Not one call of all universe ids.
-- Each successful batch is applied. Heartbeat / `stats.json` rewrite so the UI can show running.
-- Failed batch: log `book_batch_failed`, continue. `PublicApiError` only if listing is dead or **every** book batch fails.
-- Kill-switch quiet-WS REST probe is batched too.
+## Check — tests and hygiene
 
-## Check — watch slice + rotate
-
-- Do not subscribe/poll all ~1540 pairs at once.
-- Default watch: `WATCH_PAIRS = 40` (80 tokens). Documented as fitting official payload limits.
-- Remaining pairs rotate on `WATCH_ROTATE_S = 90`.
-- Flags: `--book-batch-size`, `--watch-pairs`, `--watch-rotate-s`.
-- Listing stays paginated / `--all-markets`. Safety cap stays 5000.
-
-## Check — live gate
-
-- `live_allowed()` is still false without a human `ALLOW_LIVE` dated today, and false when `ARB_MODE=paper`.
-- Paper runner cannot place live orders.
-- No `ALLOW_LIVE` file in the repo.
-
-## Check — docs
-
-- `docs/plans/cursor-batch-books-rotate.md`
-- `docs/debug-reports/2026-08-24-hour6-payload-limit.md`
-- README indexes + flags in README / `docs/guide/how-this-bot-works.md`
+- `uv run pytest` green.
+- Official SDK types only on the public runner path.
+- No `.env`, `ALLOW_LIVE`, or `data/` sqlite in the PR.

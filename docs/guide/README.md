@@ -4,6 +4,6 @@ Human docs. Not a changelog. Plans live in [`docs/plans/`](../plans/). Halt/cras
 
 | File | What |
 |---|---|
-| [how-this-bot-works.md](how-this-bot-works.md) | Completeness arb, pipeline, fees, risk, kill switch, paper UI, live gate, known paper-run issues |
+| [how-this-bot-works.md](how-this-bot-works.md) | Completeness arb, pipeline, fees, risk, kill switch, paper $500 bankroll, paper UI, live gate, known paper-run issues |
 
 Paper only. No `ALLOW_LIVE`.

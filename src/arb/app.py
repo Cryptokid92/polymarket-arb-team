@@ -22,6 +22,13 @@ from arb.fees import net_edge_maker, net_edge_taker, pair_taker_fees
 from arb.hunter import hunt
 from arb.killswitch import KillSwitch
 from arb.messages import GapFound, Intent
+from arb.paper_control import (
+    clear_pid,
+    effective_rotate_s,
+    read_control,
+    write_pid,
+)
+from arb.paper_ledger import PaperLedger
 from arb.risk import MarketFlags, Portfolio, approve
 from arb.state import StateStore
 
@@ -78,6 +85,9 @@ class PaperRunStats:
     intents: int = 0
     rejects: dict[str, int] = field(default_factory=dict)
     watching: int = 0
+    bankroll: Decimal = Decimal("500")
+    daily_pnl: Decimal = Decimal("0")
+    fills: int = 0
 
 
 class StreamHeartbeat:
@@ -321,6 +331,9 @@ def write_paper_stats(
         "rejects": sum(stats.rejects.values()),
         "reject_reasons": dict(stats.rejects),
         "watching": stats.watching,
+        "bankroll": str(stats.bankroll),
+        "daily_pnl": str(stats.daily_pnl),
+        "fills": stats.fills,
         "heartbeat_ms": _now_ms() if now_ms is None else now_ms,
     }
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -563,21 +576,42 @@ async def run_paper(
     gaps_path = data_dir / "gaps.jsonl"
     intents_path = data_dir / "intents.jsonl"
     rejects_path = data_dir / "rejects.jsonl"
+    fills_path = data_dir / "fills.jsonl"
     stats_path = data_dir / "stats.json"
     stats = PaperRunStats()
     store = BookStore()
     heartbeat = StreamHeartbeat()
     broker = PaperBroker(log_path=intents_path)
+    state = StateStore(data_dir / "state.sqlite")
     kill = KillSwitch(
         project_root=project_root,
-        state=StateStore(data_dir / "state.sqlite"),
+        state=state,
         settings=settings,
     )
-    portfolio = Portfolio(
-        yes={}, no={}, open_pairs=0, daily_pnl=Decimal("0"), halted=False
+    restored = state.restore()
+    starting_bankroll = (
+        restored.bankroll
+        if restored.bankroll is not None
+        else settings.paper_bankroll
     )
+    if restored.bankroll is None:
+        state.set_bankroll(starting_bankroll)
+    ledger = PaperLedger(
+        state, bankroll=starting_bankroll, daily_pnl=restored.daily_pnl
+    )
+    stats.bankroll = ledger.bankroll
+    stats.daily_pnl = ledger.daily_pnl
+    stats.fills = len(restored.fills) // 2
+    portfolio = Portfolio(
+        yes={}, no={}, open_pairs=0, daily_pnl=ledger.daily_pnl, halted=False
+    )
+    write_pid(data_dir)
 
-    markets = await _iter_listed_markets(client, max_markets)
+    try:
+        markets = await _iter_listed_markets(client, max_markets)
+    except BaseException:
+        clear_pid(data_dir)
+        raise
     stats.markets_listed = len(markets)
     pairs: list[UniversePair] = []
     by_token: dict[str, UniversePair] = {}
@@ -606,6 +640,9 @@ async def run_paper(
     write_paper_stats(stats_path, stats)
 
     async def consider(pair: UniversePair) -> None:
+        if read_control(data_dir).paused:
+            write_paper_stats(stats_path, stats)
+            return
         yes = store.get(pair.yes_token_id)
         no = store.get(pair.no_token_id)
         if yes is None or no is None:
@@ -649,9 +686,44 @@ async def run_paper(
             )
             _bump(stats, trace.reject_reason)
         if trace.intent is not None:
-            await paper_execute(trace.intent, broker)
-            stats.intents += 1
-            portfolio.open_pairs += 1
+            fill = await ledger.try_fill(
+                trace.intent, pair.fees, now_ms, mode="paper"
+            )
+            if not fill.accepted:
+                _append_jsonl(
+                    rejects_path,
+                    {
+                        "ts_ms": now_ms,
+                        "condition_id": pair.condition_id,
+                        "reason": fill.reject_reason,
+                    },
+                )
+                _bump(stats, fill.reject_reason or "insufficient_bankroll")
+            else:
+                await paper_execute(trace.intent, broker)
+                stats.intents += 1
+                stats.fills += 1
+                stats.bankroll = fill.bankroll
+                stats.daily_pnl = fill.daily_pnl
+                portfolio.daily_pnl = fill.daily_pnl
+                _append_jsonl(
+                    fills_path,
+                    {
+                        "ts_ms": now_ms,
+                        "condition_id": pair.condition_id,
+                        "path": fill.path,
+                        "size": str(fill.size),
+                        "yes_vwap": str(fill.yes_vwap),
+                        "no_vwap": str(fill.no_vwap),
+                        "pair_fees": str(fill.pair_fees),
+                        "cost": str(fill.cost),
+                        "pnl": str(fill.pnl),
+                        "bankroll": str(fill.bankroll),
+                        "daily_pnl": str(fill.daily_pnl),
+                    },
+                )
+        stats.bankroll = ledger.bankroll
+        stats.daily_pnl = ledger.daily_pnl
         write_paper_stats(stats_path, stats)
 
     all_token_ids = pair_token_ids(pairs)
@@ -695,17 +767,22 @@ async def run_paper(
         write_paper_stats(stats_path, stats)
 
     if all_token_ids:
-        await fetch_book_batches(
-            client,
-            all_token_ids,
-            batch_size=batch_size,
-            on_ok=apply_book_batch,
-            on_fail=log_batch_fail,
-            raise_if_all_fail=True,
-        )
+        try:
+            await fetch_book_batches(
+                client,
+                all_token_ids,
+                batch_size=batch_size,
+                on_ok=apply_book_batch,
+                on_fail=log_batch_fail,
+                raise_if_all_fail=True,
+            )
+        except BaseException:
+            clear_pid(data_dir)
+            raise
 
     if once or not all_token_ids:
         write_paper_stats(stats_path, stats)
+        clear_pid(data_dir)
         return stats
 
     deadline = time.monotonic() + seconds
@@ -810,10 +887,32 @@ async def run_paper(
 
     async def rotate_watch() -> None:
         nonlocal watch_offset
-        if len(pairs) <= watch_n or rotate_s <= 0:
+        if len(pairs) <= watch_n:
             return
         while True:
-            await asyncio.sleep(rotate_s)
+            if read_control(data_dir).paused:
+                write_paper_stats(stats_path, stats)
+                await asyncio.sleep(min(0.25, poll_s if poll_s > 0 else 0.25))
+                continue
+            target = effective_rotate_s(data_dir, rotate_s)
+            if target <= 0:
+                return
+            waited = 0.0
+            while waited < target:
+                if read_control(data_dir).paused:
+                    break
+                target = effective_rotate_s(data_dir, rotate_s)
+                if target <= 0:
+                    return
+                step_s = min(0.25, max(0.0, target - waited))
+                if step_s <= 0:
+                    break
+                await asyncio.sleep(step_s)
+                waited += step_s
+            if read_control(data_dir).paused:
+                continue
+            if effective_rotate_s(data_dir, rotate_s) <= 0:
+                return
             step = min(watch_n, len(pairs))
             next_offset = (watch_offset + step) % len(pairs)
             next_tokens = pair_token_ids(watch_slice(pairs, next_offset, watch_n))
@@ -902,5 +1001,6 @@ async def run_paper(
             await rotator
         with contextlib.suppress(asyncio.CancelledError):
             await watch
+        clear_pid(data_dir)
     write_paper_stats(stats_path, stats)
     return stats

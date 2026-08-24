@@ -60,6 +60,10 @@ Paginate every open market. Do not treat `--max-markets` as `page_size`. Subscri
 
 `--all-markets` listing is paginated; the hour-6 crash was one fat `get_order_books`. Batch REST books (50 token ids). Watch 40 pairs; rotate the rest. Do not raise `LIST_SAFETY_CAP`. See `docs/plans/cursor-batch-books-rotate.md`.
 
+## Paper bankroll + dashboard controls (not Task 12)
+
+Paper $500 bankroll (not real money). Successful intents paper-fill both legs at VWAPs, settle a completed pair at $1/share, and update `daily_pnl` / remaining bankroll. Local UI Start/Stop pauses or launches `paper_run`; watch-rotate slider is 10–120s. See `docs/plans/cursor-paper-bankroll-pnl.md`.
+
 ## Remaining
 
 12. Live path (build dark, do not run) — not now
