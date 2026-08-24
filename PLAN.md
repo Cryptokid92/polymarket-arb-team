@@ -30,7 +30,7 @@ Prefer `maker_gtc` when maker EV > 0. Allow `taker_fak` only if taker EV > 0 aft
 
 In-process bus. `run_pipeline` (hunt → risk → intent). `PaperBroker` writes JSONL under gitignored `data/`. `LiveBroker` raises unless `live_allowed()`. Cursor: OK `0f46af0`.
 
-## Task 8 — Merge + naked-leg hedge (simulated)
+## Task 8 — Merge + naked-leg hedge (simulated) — done
 
 Paper merge returns `min(yes, no)` with no network. After timeout, sell leftover naked size FAK (`incident=True`). Live merge raises (Task 12). Tests: `uv run pytest tests/test_merge.py tests/test_naked_leg.py tests/test_executor_paper.py tests/test_fee_agent.py tests/test_risk.py tests/test_hunter.py tests/test_books.py tests/test_fees.py tests/test_money.py -q`.
 
