@@ -15,5 +15,7 @@ Do not put live keys, `.env`, paper fills, or sqlite in this folder.
 | [grok-how-this-bot-works.md](grok-how-this-bot-works.md) | Grok Build 24 Aug 2026 | Human guide: how this completeness-arb bot works. |
 | [cursor-fix-quiet-ws-stale.md](cursor-fix-quiet-ws-stale.md) | Cursor 24 Aug 2026 | Quiet live WS must not trip `ws_stale`. |
 | [cursor-ui-follows-runner.md](cursor-ui-follows-runner.md) | Grok 24 Aug 2026 | Paper UI last event must follow `stats.json` / runner heartbeat. |
+| [cursor-list-all-markets.md](cursor-list-all-markets.md) | Grok 24 Aug 2026 | Paginate every open market; subscribe only the v1 universe. |
+| [debug-list-all-markets.md](debug-list-all-markets.md) | Grok 24 Aug 2026 | Why `--max-markets 80` was one page of mostly `neg_risk`. |
 
 Paper only. No `ALLOW_LIVE`.

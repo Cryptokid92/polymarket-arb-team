@@ -38,7 +38,7 @@ This is not a directional bet. It is not cross-market arb. It is not a mid signa
 
 One Python process. Specialists are functions, not separate services. There is an in-process bus (`arb.bus`) if something wants to subscribe. The paper loop calls the pipeline directly.
 
-1. **List markets.** `AsyncPublicClient.list_markets(closed=False)`. Default cap is 20 (`--max-markets`). If the public API is unreachable, the runner exits with a clear error and does not fake gaps.
+1. **List markets.** `AsyncPublicClient.list_markets(closed=False, page_size=100)`. Walk official pages until the catalog ends, `--max-markets`, or the documented safety ceiling (`5000`). Default `--max-markets` is 20 (tests). `--all-markets` or `--max-markets 0` means no user cap. `markets_listed` is every market seen; `universe` is what `reject_universe` kept. If the public API is unreachable, the runner exits with a clear error and does not fake gaps.
 2. **v1 universe filter.** Drop closed/archived, not accepting, neg-risk, delayed (`seconds_delay > 0`), missing YES/NO token ids, and 5/15-minute crypto windows (slug/question/tags matching crypto plus a 5 or 15 minute window).
 3. **Books.** REST snapshot of YES/NO token ids first (`get_order_books`). Then websocket `subscribe(MarketSpec(token_ids=...))` if the client has it; otherwise poll REST. `BookStore` applies snapshots and `price_change` deltas.
 4. **Hunt.** `hunt()` walks both ask books. No gap → nothing else runs.
@@ -118,6 +118,9 @@ Leave `ARB_MODE=paper`. Do not create `ALLOW_LIVE`.
 ```bash
 # Public books only. Cannot place orders.
 uv run python scripts/paper_run.py --seconds 3600
+
+# All open markets (page walk; safety ceiling 5000). Subscribe only v1 pairs.
+uv run python scripts/paper_run.py --all-markets --seconds 3600
 ```
 
 In another terminal:
@@ -179,7 +182,7 @@ Six-agent Cursor debug was still in flight when that report was filed. Hour runn
 
 ### Scans
 
-Public API connected. First page is mostly `neg_risk`. Universe is tiny (1–2 markets on the scans we logged). No gaps in those runs. This host is geoblocked for live (US/AZ). Paper skips geoblock. Do not treat this host as a live venue.
+Public API connected. `--max-markets 80` was one page, mostly `neg_risk`, so `listed=80` / `universe=1–2` was not the full catalog. `--all-markets` walks pages (ceiling 5000) and still filters the v1 universe before subscribe. No gaps in those early runs. This host is geoblocked for live (US/AZ). Paper skips geoblock. Do not treat this host as a live venue.
 
 ## Where the code lives
 

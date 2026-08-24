@@ -35,6 +35,12 @@ Paper only. Reads **public** books. **Cannot place orders.** Never constructs a 
 ```bash
 # Leave ARB_MODE=paper. Do not create ALLOW_LIVE.
 uv run python scripts/paper_run.py --seconds 3600
+
+# All open markets (walks list_markets pages; safety ceiling 5000).
+# Still refuses neg-risk / delay / non-binary / short crypto windows.
+# Subscribes only the kept v1 YES/NO pairs.
+uv run python scripts/paper_run.py --all-markets --seconds 3600
+# equivalent: --max-markets 0
 ```
 
 In another terminal, watch the gitignored logs (read-only local UI, binds `127.0.0.1:8765`):
@@ -66,7 +72,7 @@ Writes gitignored JSONL (covered by `data/`):
 
 These match the installed client in this repo. If they drift, follow the installed signatures:
 
-- `AsyncPublicClient.list_markets(closed=False, ...)` — paginator with `iter_items()`.
+- `AsyncPublicClient.list_markets(closed=False, page_size=100)` — paginator; the runner walks pages (`async for page in pages`) until exhausted, `--max-markets`, or the 5000 safety ceiling. `--all-markets` / `--max-markets 0` means no user cap.
 - `get_order_books(token_ids=...)` — snapshot asks+bids+depth.
 - `subscribe(MarketSpec(token_ids=...))` **is** present. The runner subscribes to YES/NO token ids. If `subscribe` is missing on a future client, it polls `get_order_books` instead.
 

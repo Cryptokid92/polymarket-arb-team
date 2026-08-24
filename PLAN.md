@@ -44,13 +44,17 @@ Replay recorded asks+bids+depth (never last-trade or mid). Model one-leg FAK mis
 
 ## Task 11 — Paper runner (networked, no orders) — done
 
-`scripts/paper_run.py` lists open markets via `AsyncPublicClient.list_markets(closed=False)`, filters the v1 universe, subscribes (or polls) YES/NO books, and runs hunt → risk → fee → paper executor. Writes `data/paper/gaps.jsonl` and `data/paper/intents.jsonl`. Never constructs a secure trading client. Unreachable API fails clearly and does not fake gaps. `scripts/report_paper.py` prints gaps, intents, estimated maker/taker EV, and reject reasons.
+`scripts/paper_run.py` lists open markets via `AsyncPublicClient.list_markets(closed=False)`, walking pages (`page_size=100`) until exhausted, `--max-markets`, or the 5000 safety ceiling. `--all-markets` / `--max-markets 0` means no user cap. It then filters the v1 universe and subscribes (or polls) only those YES/NO books, and runs hunt → risk → fee → paper executor. Writes `data/paper/gaps.jsonl` and `data/paper/intents.jsonl`. Never constructs a secure trading client. Unreachable API fails clearly and does not fake gaps. `scripts/report_paper.py` prints gaps, intents, estimated maker/taker EV, and reject reasons.
 
 Tests: `uv run pytest -q`.
 
 ## Paper dashboard (not Task 12) — done
 
 Read-only local UI (`scripts/paper_ui.py`, stdlib `http.server`) watches gitignored paper JSONL + optional `stats.json` / sqlite under `--data-dir` (default `data/paper`). Banner is paper-only. Binds `127.0.0.1:8765`. Missing logs show zeros. Never places orders. Not Task 12.
+
+## Paper list-all-markets (not Task 12)
+
+Paginate every open market. Do not treat `--max-markets` as `page_size`. Subscribe only the v1 universe. Caps and universe rules stay tight. See `docs/plans/cursor-list-all-markets.md`.
 
 ## Remaining
 

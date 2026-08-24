@@ -45,3 +45,9 @@ Paper dashboard (not Task 12): read-only local UI to watch paper runner logs.
 Paper UI follows the runner (not Task 12): hour-5 showed stale while `paper_run` was up and rewriting `stats.json`. Last event now includes stats mtime and `heartbeat_ms`. Stale does not invent a halt.
 
 - `uv run pytest -q` — 137 passed
+
+Paper list-all-markets (not Task 12): walk `list_markets` pages instead of one page of `page_size=max_markets`. `--all-markets` / `--max-markets 0` uses the 5000 safety ceiling. Universe/risk caps unchanged. Subscribe only kept v1 pairs.
+
+- `markets_listed` = all seen; `universe` = kept
+- README / guide document `paper_run.py --all-markets --seconds 3600`
+- Plan: `docs/plans/cursor-list-all-markets.md`

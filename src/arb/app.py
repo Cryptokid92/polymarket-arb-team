@@ -27,6 +27,10 @@ from arb.state import StateStore
 
 _TAKER_BUFFER = Decimal("0.005")
 _MAX_SHARES = Decimal("1000000")
+# Official list_markets page size. Do not pass max_markets as page_size.
+LIST_PAGE_SIZE = 100
+# Documented ceiling for --all-markets / --max-markets 0.
+LIST_SAFETY_CAP = 5000
 _SHORT_WINDOW = re.compile(
     r"(?:^|[^0-9])(?:5|15)(?:\s|-)?(?:m(?:in(?:ute)?s?)?)\b",
     re.IGNORECASE,
@@ -312,9 +316,26 @@ def write_paper_stats(
     tmp.replace(path)
 
 
+def listing_limit(max_markets: int) -> int:
+    """How many listed markets to keep. 0 or less means no user cap.
+
+    The safety ceiling always applies so a runaway paginator cannot load
+    unbounded catalogs into memory.
+    """
+    if max_markets <= 0:
+        return LIST_SAFETY_CAP
+    return min(int(max_markets), LIST_SAFETY_CAP)
+
+
 async def _iter_listed_markets(client: Any, max_markets: int) -> list[Any]:
+    """Walk official list_markets pages until exhausted, the user cap, or the safety ceiling.
+
+    `page_size` is always LIST_PAGE_SIZE. Do not request one page of
+    `page_size=max_markets`.
+    """
+    limit = listing_limit(max_markets)
     try:
-        listed = client.list_markets(closed=False, page_size=max_markets)
+        listed = client.list_markets(closed=False, page_size=LIST_PAGE_SIZE)
         if inspect.isawaitable(listed):
             listed = await listed
     except PublicApiError:
@@ -323,15 +344,33 @@ async def _iter_listed_markets(client: Any, max_markets: int) -> list[Any]:
         raise PublicApiError(f"public API is unreachable: {exc}") from exc
 
     items: list[Any] = []
+
+    def _take(market: Any) -> bool:
+        items.append(market)
+        return len(items) >= limit
+
+    if callable(getattr(listed, "__aiter__", None)):
+        async for page in listed:
+            page_items = getattr(page, "items", None)
+            if page_items is None:
+                if _take(page):
+                    return items
+                continue
+            if not page_items:
+                break
+            for market in page_items:
+                if _take(market):
+                    return items
+        return items
+
     iter_items = getattr(listed, "iter_items", None)
     if callable(iter_items):
         async for market in iter_items():
-            items.append(market)
-            if len(items) >= max_markets:
+            if _take(market):
                 break
         return items
     if isinstance(listed, list):
-        return listed[:max_markets]
+        return listed[:limit]
     raise PublicApiError("public API is unreachable: list_markets returned no page")
 
 
