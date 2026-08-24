@@ -1,0 +1,36 @@
+# Secrets and local env. Keep .env.example tracked.
+.env
+.env.*
+!.env.example
+
+# Human-created live / halt gates — never commit.
+ALLOW_LIVE
+HALT
+
+# Python / tooling
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+dist/
+build/
+
+# Local state, paper fills, secrets
+data/
+*.db
+*.sqlite
+*.sqlite3
+secrets/
+*.paper.log
+*.paper.jsonl
+paper_fills*
+paper-fills*
+fills.jsonl
+fills.log
