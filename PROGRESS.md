@@ -43,3 +43,5 @@ Paper dashboard (not Task 12): read-only local UI to watch paper runner logs.
 - `ALLOW_LIVE` was not created. Live trading is not enabled. No secrets committed.
 
 Paper UI follows the runner (not Task 12): hour-5 showed stale while `paper_run` was up and rewriting `stats.json`. Last event now includes stats mtime and `heartbeat_ms`. Stale does not invent a halt.
+
+- `uv run pytest -q` — 137 passed
