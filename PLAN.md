@@ -32,11 +32,16 @@ In-process bus. `run_pipeline` (hunt → risk → intent). `PaperBroker` writes 
 
 ## Task 8 — Merge + naked-leg hedge (simulated) — done
 
-Paper merge returns `min(yes, no)` with no network. After timeout, sell leftover naked size FAK (`incident=True`). Live merge raises (Task 12). Tests: `uv run pytest tests/test_merge.py tests/test_naked_leg.py tests/test_executor_paper.py tests/test_fee_agent.py tests/test_risk.py tests/test_hunter.py tests/test_books.py tests/test_fees.py tests/test_money.py -q`.
+Paper merge returns `min(yes, no)` with no network. After timeout, sell leftover naked size FAK (`incident=True`). Live merge raises (Task 12). Cursor: OK `13c0fa0`.
+
+## Task 9 — Kill switch, state dump, preflight — done
+
+Crash-safe sqlite state (path injectable, default `data/state.sqlite`). Paper preflight skips secrets. Live preflight would check geoblock (injected fetcher), keys, `ALLOW_LIVE` date, and caps — default tests stay offline. Kill switch trips on daily loss, `HALT` file, stale WS, or ≥3 hedge incidents / hour. After halt: refuse new intents; do not auto-resume. Paper only sets `halted=True` (live `cancel_all` is Task 12).
+
+Tests: `uv run pytest tests/test_preflight.py tests/test_killswitch.py tests/test_state.py tests/test_merge.py tests/test_naked_leg.py tests/test_executor_paper.py tests/test_fee_agent.py tests/test_risk.py tests/test_hunter.py tests/test_books.py tests/test_fees.py tests/test_money.py -q`.
 
 ## Remaining (paper only)
 
-9. Kill switch, state dump, preflight
 10. Recorder + backtest + adversary
 11. Paper runner (networked, no orders)
 12. Live path (build dark, do not run) — not now
