@@ -24,11 +24,14 @@ Refuse halted, non-binary, delayed, neg-risk, stale, too-good, over-pair, daily-
 
 ## Task 6 — Fee agent — done
 
-Prefer `maker_gtc` when maker EV > 0. Allow `taker_fak` only if taker EV > 0 after protocol fees + `0.005`/share buffer. Rebates never in EV. Tests: `uv run pytest tests/test_fee_agent.py tests/test_risk.py tests/test_hunter.py tests/test_books.py tests/test_fees.py tests/test_money.py -q`.
+Prefer `maker_gtc` when maker EV > 0. Allow `taker_fak` only if taker EV > 0 after protocol fees + `0.005`/share buffer. Rebates never in EV. Cursor: OK `d2d2acc`.
+
+## Task 7 — Paper executor + bus wiring
+
+In-process bus. `run_pipeline` (hunt → risk → intent). `PaperBroker` writes JSONL under gitignored `data/`. `LiveBroker` raises unless `live_allowed()`. Tests: `uv run pytest tests/test_executor_paper.py tests/test_fee_agent.py tests/test_risk.py tests/test_hunter.py tests/test_books.py tests/test_fees.py tests/test_money.py -q`.
 
 ## Remaining (paper only)
 
-7. Paper executor + bus wiring
 8. Merge + naked-leg hedge (simulated)
 9. Kill switch, state dump, preflight
 10. Recorder + backtest + adversary
