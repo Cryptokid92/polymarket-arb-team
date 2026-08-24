@@ -5,6 +5,7 @@ from __future__ import annotations
 import ast
 import inspect
 import json
+import textwrap
 from datetime import date
 from pathlib import Path
 from typing import Any
@@ -55,7 +56,7 @@ def _load_pair(name: str) -> tuple[Any, Any, dict[str, Any]]:
 def _assert_no_secure_client(source: str) -> None:
     assert "AsyncSecureClient" not in source
     assert "from polymarket" not in source
-    tree = ast.parse(source)
+    tree = ast.parse(textwrap.dedent(source))
     for node in ast.walk(tree):
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
             assert node.func.id != "AsyncSecureClient"

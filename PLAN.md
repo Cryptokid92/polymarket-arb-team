@@ -26,7 +26,7 @@ Refuse halted, non-binary, delayed, neg-risk, stale, too-good, over-pair, daily-
 
 Prefer `maker_gtc` when maker EV > 0. Allow `taker_fak` only if taker EV > 0 after protocol fees + `0.005`/share buffer. Rebates never in EV. Cursor: OK `d2d2acc`.
 
-## Task 7 — Paper executor + bus wiring
+## Task 7 — Paper executor + bus wiring — done
 
 In-process bus. `run_pipeline` (hunt → risk → intent). `PaperBroker` writes JSONL under gitignored `data/`. `LiveBroker` raises unless `live_allowed()`. Tests: `uv run pytest tests/test_executor_paper.py tests/test_fee_agent.py tests/test_risk.py tests/test_hunter.py tests/test_books.py tests/test_fees.py tests/test_money.py -q`.
 
