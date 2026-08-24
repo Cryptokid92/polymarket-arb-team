@@ -51,3 +51,5 @@ Paper list-all-markets (not Task 12): walk `list_markets` pages instead of one p
 - `markets_listed` = all seen; `universe` = kept
 - README / guide document `paper_run.py --all-markets --seconds 3600`
 - Plan: `docs/plans/cursor-list-all-markets.md`
+- `uv run pytest -q` — 146 passed
+- `ALLOW_LIVE` was not created. Live trading is not enabled. No secrets committed.
