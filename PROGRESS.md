@@ -39,4 +39,5 @@ Paper dashboard (not Task 12): read-only local UI to watch paper runner logs.
 - Reject-reason breakdown, recent gaps/intents, halt from `HALT` / `state.sqlite` (read-only)
 - Auto-refresh every 2s
 - Offline fixture tests under `tests/fixtures/paper_ui/`
+- `uv run pytest -q` — 110 passed
 - `ALLOW_LIVE` was not created. Live trading is not enabled. No secrets committed.
