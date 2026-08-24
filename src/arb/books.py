@@ -121,12 +121,16 @@ def _token_id_of(payload: dict[str, Any]) -> str:
     return str(token_id)
 
 
+def _missing_decimal(value: object) -> bool:
+    return value is None or value == ""
+
+
 def book_from_payload(payload: dict[str, Any], *, previous: Book | None = None) -> Book:
     tick = payload.get("tick", payload.get("tick_size"))
     min_order = payload.get("min_order_size", payload.get("minOrderSize"))
-    if tick is None:
+    if _missing_decimal(tick):
         tick = previous.tick if previous is not None else Decimal("0.01")
-    if min_order is None:
+    if _missing_decimal(min_order):
         min_order = previous.min_order_size if previous is not None else Decimal("5")
     return Book(
         token_id=_token_id_of(payload),
