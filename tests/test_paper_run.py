@@ -434,7 +434,8 @@ def test_list_all_markets_does_not_loosen_universe_or_risk() -> None:
     assert fields["min_edge"].default == Decimal("0.01")
     assert fields["max_gap"].default == Decimal("0.08")
     source = Path("src/arb/app.py").read_text(encoding="utf-8")
-    assert "page_size=max_markets" not in source
+    assert "list_markets(closed=False, page_size=LIST_PAGE_SIZE)" in source
+    assert "list_markets(closed=False, page_size=max_markets)" not in source
     assert "async for page in listed" in source
     assert 'return "neg_risk"' in source
     assert "seconds_delay" in source
