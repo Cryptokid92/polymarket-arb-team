@@ -8,11 +8,14 @@ Repo layout, MIT license, paper-default `Settings`, Decimal money helpers, dual 
 
 ## Task 2 — Fees (pure function) — done
 
-Protocol taker fee `C * feeRate * p * (1-p)`. Makers pay 0. Never include maker rebates in EV. Official table rounding (100 crypto @ $0.01 → $0.07). Tests: `uv run pytest tests/test_fees.py tests/test_money.py -q`.
+Protocol taker fee `C * feeRate * p * (1-p)`. Makers pay 0. Never include maker rebates in EV. Cursor: OK `0c890a1`.
+
+## Task 3 — Book store + ask walk — done
+
+Reconstruct YES/NO books from snapshots + `price_change` deltas. Walk ask depth (VWAP); do not size by mid or top-of-book only. Tests: `uv run pytest tests/test_books.py tests/test_fees.py tests/test_money.py -q`.
 
 ## Remaining (paper only)
 
-3. Book store + ask walk
 4. Hunter
 5. Risk agent
 6. Fee agent

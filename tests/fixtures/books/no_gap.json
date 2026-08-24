@@ -1,0 +1,21 @@
+{
+  "yes": {
+    "token_id": "yes-no-gap",
+    "bids": [{"price": "0.49", "size": "20"}],
+    "asks": [{"price": "0.50", "size": "50"}],
+    "tick": "0.01",
+    "min_order_size": "5",
+    "ts_ms": 1000,
+    "hash": "yes-no-gap-v1"
+  },
+  "no": {
+    "token_id": "no-no-gap",
+    "bids": [{"price": "0.49", "size": "20"}],
+    "asks": [{"price": "0.50", "size": "50"}],
+    "tick": "0.01",
+    "min_order_size": "5",
+    "ts_ms": 1000,
+    "hash": "no-no-gap-v1"
+  },
+  "max_shares": "50"
+}
