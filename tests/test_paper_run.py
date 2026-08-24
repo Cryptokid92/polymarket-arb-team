@@ -13,15 +13,21 @@ import pytest
 from polymarket.models.clob.market_events import parse_market_event
 
 from arb.app import (
+    BOOK_BATCH_SIZE,
     LIST_PAGE_SIZE,
     LIST_SAFETY_CAP,
+    WATCH_PAIRS,
+    WATCH_ROTATE_S,
     PublicApiError,
     StreamHeartbeat,
     _iter_listed_markets,
+    chunk_ids,
     listing_limit,
+    pair_token_ids,
     reject_universe,
     run_paper,
     stream_liveness_probe_due,
+    watch_slice,
 )
 from arb.config import Settings
 from arb.money import d
@@ -156,7 +162,9 @@ class _PagedPublic:
         self.list_kwargs: dict[str, object] = {}
         self.paginator: _PagedPaginator | None = None
         self.book_token_ids: list[str] = []
+        self.book_call_ids: list[list[str]] = []
         self.subscribed_token_ids: list[str] = []
+        self.subscribe_calls: list[list[str]] = []
 
     def list_markets(self, *, closed: bool = False, page_size: int = 20, **kwargs):
         self.list_kwargs = {"closed": closed, "page_size": page_size, **kwargs}
@@ -164,10 +172,12 @@ class _PagedPublic:
         return self.paginator
 
     async def get_order_books(self, *, token_ids: list[str]):
-        self.book_token_ids = list(token_ids)
+        self.book_call_ids.append(list(token_ids))
+        self.book_token_ids.extend(token_ids)
         return []
 
     def subscribe(self, token_ids: list[str]):
+        self.subscribe_calls.append(list(token_ids))
         self.subscribed_token_ids = list(token_ids)
 
         async def gen():
@@ -192,7 +202,9 @@ class _MockPublic:
         self.fail_books = fail_books
         self.book_calls = 0
         self.book_token_ids: list[str] = []
+        self.book_call_ids: list[list[str]] = []
         self.subscribed_token_ids: list[str] = []
+        self.subscribe_calls: list[list[str]] = []
         self.list_kwargs: dict[str, object] = {}
 
     def list_markets(self, *, closed: bool = False, page_size: int = 20, **kwargs):
@@ -203,6 +215,7 @@ class _MockPublic:
 
     async def get_order_books(self, *, token_ids: list[str]):
         self.book_calls += 1
+        self.book_call_ids.append(list(token_ids))
         self.book_token_ids = list(token_ids)
         if self.fail_books:
             raise TimeoutError("timed out")
@@ -224,6 +237,7 @@ class _SilentStreamPublic(_MockPublic):
     """Public client whose websocket stays open but never delivers another event."""
 
     def subscribe(self, token_ids: list[str]):
+        self.subscribe_calls.append(list(token_ids))
         self.subscribed_token_ids = list(token_ids)
         return _keep_subscribe_open([])
 
@@ -255,6 +269,8 @@ class _QuietThenDeadRest(_SilentStreamPublic):
 
     async def get_order_books(self, *, token_ids: list[str]):
         self.book_calls += 1
+        self.book_call_ids.append(list(token_ids))
+        self.book_token_ids = list(token_ids)
         if self.book_calls > 1:
             raise TimeoutError("timed out")
         return [self.books[tid] for tid in token_ids if tid in self.books]
@@ -265,8 +281,32 @@ class _PollBooksFailAfterFirst(_MockPublic):
 
     async def get_order_books(self, *, token_ids: list[str]):
         self.book_calls += 1
+        self.book_call_ids.append(list(token_ids))
+        self.book_token_ids = list(token_ids)
         if self.book_calls > 1:
             raise TimeoutError("timed out")
+        return [self.books[tid] for tid in token_ids if tid in self.books]
+
+
+class _FailSelectedBookBatches(_MockPublic):
+    """Fail get_order_books only when the batch contains a chosen token."""
+
+    def __init__(
+        self,
+        markets: list[object],
+        books: dict[str, object],
+        *,
+        fail_token: str,
+    ) -> None:
+        super().__init__(markets, books)
+        self.fail_token = fail_token
+
+    async def get_order_books(self, *, token_ids: list[str]):
+        self.book_calls += 1
+        self.book_call_ids.append(list(token_ids))
+        self.book_token_ids = list(token_ids)
+        if self.fail_token in token_ids:
+            raise RuntimeError("Payload exceeds the limit")
         return [self.books[tid] for tid in token_ids if tid in self.books]
 
 
@@ -868,6 +908,240 @@ async def test_poll_fetch_fail_after_snapshot_trips_ws_stale(tmp_path: Path) -> 
     restored = StateStore(data_dir / "state.sqlite").restore()
     assert restored.halted is True
     assert restored.halt_reason == "ws_stale"
+
+
+def _gap_markets(n: int) -> list[object]:
+    return [
+        _market(condition_id=f"c{i}", yes_id=f"y{i}", no_id=f"n{i}") for i in range(n)
+    ]
+
+
+def _gap_books_n(n: int) -> dict[str, object]:
+    books: dict[str, object] = {}
+    for i in range(n):
+        books[f"y{i}"] = _book(f"y{i}", "0.54", "0.55")
+        books[f"n{i}"] = _book(f"n{i}", "0.41", "0.42")
+    return books
+
+
+def test_book_batch_and_watch_defaults_fit_payload_limits() -> None:
+    assert BOOK_BATCH_SIZE == 50
+    assert WATCH_PAIRS == 40
+    assert WATCH_ROTATE_S == 90
+    assert LIST_SAFETY_CAP == 5000
+    assert BOOK_BATCH_SIZE < 100
+    assert WATCH_PAIRS * 2 == 80
+
+
+def test_chunk_ids_splits_without_one_fat_payload() -> None:
+    assert chunk_ids(["a", "b", "c", "d", "e"], 2) == [["a", "b"], ["c", "d"], ["e"]]
+    assert chunk_ids([], 50) == []
+    assert chunk_ids(["only"], 50) == [["only"]]
+    assert chunk_ids(["a", "b"], 0) == [["a"], ["b"]]
+
+
+def test_watch_slice_rotates_and_wraps() -> None:
+    items = ["a", "b", "c", "d", "e"]
+    assert watch_slice(items, 0, 2) == ["a", "b"]
+    assert watch_slice(items, 2, 2) == ["c", "d"]
+    assert watch_slice(items, 4, 2) == ["e", "a"]
+    assert watch_slice(items, 0, 40) == items
+    assert watch_slice([], 0, 40) == []
+
+
+def test_pair_token_ids_keeps_yes_no_together() -> None:
+    from arb.fee_agent import MarketFees
+    from arb.risk import MarketFlags
+
+    from arb.app import UniversePair
+
+    pair = UniversePair(
+        condition_id="c",
+        yes_token_id="yes-1",
+        no_token_id="no-1",
+        flags=MarketFlags(
+            accepting_orders=True, seconds_delay=0, neg_risk=False, binary=True
+        ),
+        fees=MarketFees(yes_rate=Decimal("0"), no_rate=Decimal("0")),
+    )
+    assert pair_token_ids([pair]) == ["yes-1", "no-1"]
+
+
+def test_batch_books_does_not_loosen_universe_or_risk() -> None:
+    from arb.config import _EnvSettings
+
+    fields = _EnvSettings.model_fields
+    assert fields["stale_ms"].default == 400
+    assert fields["ws_stale_ms"].default == 3000
+    assert fields["min_edge"].default == Decimal("0.01")
+    assert fields["max_gap"].default == Decimal("0.08")
+    source = Path("src/arb/app.py").read_text(encoding="utf-8")
+    assert "LIST_SAFETY_CAP = 5000" in source
+    assert "BOOK_BATCH_SIZE = 50" in source
+    assert "WATCH_PAIRS = 40" in source
+    assert "fetch_book_batches" in source
+    assert 'return "neg_risk"' in source
+    assert "seconds_delay" in source
+    assert "short_crypto_window" in source
+    assert "not_binary" in source
+
+
+@pytest.mark.asyncio
+async def test_opening_books_are_batched_not_one_fat_payload(tmp_path: Path) -> None:
+    n = 6
+    client = _MockPublic(_gap_markets(n), _gap_books_n(n))
+    stats = await run_paper(
+        client=client,
+        settings=_settings(),
+        project_root=tmp_path,
+        data_dir=tmp_path / "paper",
+        once=True,
+        book_batch_size=2,
+    )
+    assert stats.universe == n
+    assert client.book_calls == n
+    assert all(len(batch) <= 2 for batch in client.book_call_ids)
+    requested = [tid for batch in client.book_call_ids for tid in batch]
+    assert set(requested) == {f"y{i}" for i in range(n)} | {f"n{i}" for i in range(n)}
+    snapshot = json.loads((tmp_path / "paper" / "stats.json").read_text(encoding="utf-8"))
+    assert snapshot["heartbeat_ms"] > 0
+    assert snapshot["universe"] == n
+    assert stats.gaps >= 1
+
+
+@pytest.mark.asyncio
+async def test_failed_book_batch_is_logged_and_other_batches_continue(
+    tmp_path: Path,
+) -> None:
+    n = 3
+    client = _FailSelectedBookBatches(
+        _gap_markets(n), _gap_books_n(n), fail_token="y1"
+    )
+    stats = await run_paper(
+        client=client,
+        settings=_settings(),
+        project_root=tmp_path,
+        data_dir=tmp_path / "paper",
+        once=True,
+        book_batch_size=2,
+    )
+    assert stats.universe == n
+    assert stats.rejects.get("book_batch_failed", 0) >= 1
+    rejects = (tmp_path / "paper" / "rejects.jsonl").read_text(encoding="utf-8")
+    assert "book_batch_failed" in rejects
+    assert "Payload exceeds the limit" in rejects
+    assert stats.gaps >= 1
+    snapshot = json.loads((tmp_path / "paper" / "stats.json").read_text(encoding="utf-8"))
+    assert snapshot["heartbeat_ms"] > 0
+    assert snapshot["universe"] == n
+
+
+@pytest.mark.asyncio
+async def test_every_book_batch_fail_raises_public_api_error(tmp_path: Path) -> None:
+    client = _MockPublic(_gap_markets(3), _gap_books_n(3), fail_books=True)
+    with pytest.raises(PublicApiError, match="every book batch failed"):
+        await run_paper(
+            client=client,
+            settings=_settings(),
+            project_root=tmp_path,
+            data_dir=tmp_path / "paper",
+            once=True,
+            book_batch_size=2,
+        )
+
+
+@pytest.mark.asyncio
+async def test_watch_slice_does_not_subscribe_all_universe_pairs(
+    tmp_path: Path,
+) -> None:
+    n = 5
+    client = _SilentStreamPublic(_gap_markets(n), _gap_books_n(n))
+    stats = await run_paper(
+        client=client,
+        settings=_settings(),
+        project_root=tmp_path,
+        data_dir=tmp_path / "paper",
+        once=False,
+        seconds=0.2,
+        poll_s=0.05,
+        watch_pairs=2,
+        watch_rotate_s=0,
+        book_batch_size=4,
+    )
+    assert stats.universe == n
+    assert stats.watching == 2
+    assert client.subscribe_calls
+    first = client.subscribe_calls[0]
+    assert first == ["y0", "n0", "y1", "n1"]
+    assert len(first) == 4
+    assert "y4" not in first
+    assert "n4" not in first
+
+
+@pytest.mark.asyncio
+async def test_watch_rotates_remaining_universe_pairs(tmp_path: Path) -> None:
+    n = 4
+    client = _SilentStreamPublic(_gap_markets(n), _gap_books_n(n))
+    await run_paper(
+        client=client,
+        settings=_settings(),
+        project_root=tmp_path,
+        data_dir=tmp_path / "paper",
+        once=False,
+        seconds=0.7,
+        poll_s=0.05,
+        watch_pairs=2,
+        watch_rotate_s=0.15,
+        book_batch_size=4,
+    )
+    seen = {tuple(call) for call in client.subscribe_calls}
+    assert len(seen) >= 2
+    watched = {tid for call in client.subscribe_calls for tid in call}
+    assert {"y0", "n0", "y1", "n1", "y2", "n2", "y3", "n3"} <= watched
+    snapshot = json.loads((tmp_path / "paper" / "stats.json").read_text(encoding="utf-8"))
+    assert snapshot["heartbeat_ms"] > 0
+    assert snapshot["universe"] == n
+
+
+@pytest.mark.asyncio
+async def test_quiet_ws_liveness_probe_is_batched(tmp_path: Path) -> None:
+    n = 3
+    client = _SilentStreamPublic(_gap_markets(n), _gap_books_n(n))
+    await run_paper(
+        client=client,
+        settings=_settings(ws_stale_ms=80),
+        project_root=tmp_path,
+        data_dir=tmp_path / "paper",
+        once=False,
+        seconds=0.5,
+        poll_s=0.05,
+        watch_pairs=3,
+        watch_rotate_s=0,
+        book_batch_size=2,
+    )
+    restored = StateStore((tmp_path / "paper") / "state.sqlite").restore()
+    assert restored.halted is False
+    assert all(len(batch) <= 2 for batch in client.book_call_ids)
+    assert client.book_calls > 3
+
+
+def test_paper_run_cli_batch_and_watch_flags() -> None:
+    module = _load_script("paper_run_cli_batch", Path("scripts/paper_run.py"))
+    args = module.parse_args([])
+    assert args.book_batch_size == BOOK_BATCH_SIZE
+    assert args.watch_pairs == WATCH_PAIRS
+    assert args.watch_rotate_s == WATCH_ROTATE_S
+    args = module.parse_args(
+        ["--book-batch-size", "25", "--watch-pairs", "10", "--watch-rotate-s", "30"]
+    )
+    assert args.book_batch_size == 25
+    assert args.watch_pairs == 10
+    assert args.watch_rotate_s == 30.0
+    source = Path("scripts/paper_run.py").read_text(encoding="utf-8")
+    assert "--book-batch-size" in source
+    assert "--watch-pairs" in source
+    assert "--watch-rotate-s" in source
+    assert "LIST_SAFETY_CAP" in source
 
 
 def test_report_paper_prints_stats(tmp_path: Path) -> None:

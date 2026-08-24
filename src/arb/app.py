@@ -30,7 +30,18 @@ _MAX_SHARES = Decimal("1000000")
 # Official list_markets page size. Do not pass max_markets as page_size.
 LIST_PAGE_SIZE = 100
 # Documented ceiling for --all-markets / --max-markets 0.
+# Do not raise this as a payload-limit fix; listing is already paginated.
 LIST_SAFETY_CAP = 5000
+# REST get_order_books token-id batch. Hour-6 --all-markets died on one
+# request of ~3080 ids ("Payload exceeds the limit"). 50 stays under
+# official CLOB payload limits.
+BOOK_BATCH_SIZE = 50
+# Live subscribe/poll window. 40 pairs = 80 token ids. Do not subscribe
+# all ~1540 universe pairs at once.
+WATCH_PAIRS = 40
+# Rotate the watch window so the rest of the universe is visited during
+# a 1-hour run. 90s * 40 pairs ≈ 1600 pair-looks/hour.
+WATCH_ROTATE_S = 90
 _SHORT_WINDOW = re.compile(
     r"(?:^|[^0-9])(?:5|15)(?:\s|-)?(?:m(?:in(?:ute)?s?)?)\b",
     re.IGNORECASE,
@@ -66,6 +77,7 @@ class PaperRunStats:
     gaps: int = 0
     intents: int = 0
     rejects: dict[str, int] = field(default_factory=dict)
+    watching: int = 0
 
 
 class StreamHeartbeat:
@@ -308,6 +320,7 @@ def write_paper_stats(
         "intents": stats.intents,
         "rejects": sum(stats.rejects.values()),
         "reject_reasons": dict(stats.rejects),
+        "watching": stats.watching,
         "heartbeat_ms": _now_ms() if now_ms is None else now_ms,
     }
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -325,6 +338,27 @@ def listing_limit(max_markets: int) -> int:
     if max_markets <= 0:
         return LIST_SAFETY_CAP
     return min(int(max_markets), LIST_SAFETY_CAP)
+
+
+def chunk_ids(token_ids: Sequence[str], batch_size: int) -> list[list[str]]:
+    """Split token ids into REST get_order_books batches. Never one fat list."""
+    size = max(1, int(batch_size))
+    ids = list(token_ids)
+    return [ids[i : i + size] for i in range(0, len(ids), size)]
+
+
+def watch_slice(items: Sequence[Any], offset: int, watch_pairs: int) -> list[Any]:
+    """Current rotating window. Wraps. Empty if there is nothing to watch."""
+    if not items or watch_pairs <= 0:
+        return []
+    count = min(int(watch_pairs), len(items))
+    start = int(offset) % len(items)
+    return [items[(start + i) % len(items)] for i in range(count)]
+
+
+def pair_token_ids(pairs: Sequence[UniversePair]) -> list[str]:
+    """YES then NO for each pair so a batch keeps both legs together when even."""
+    return [token for pair in pairs for token in (pair.yes_token_id, pair.no_token_id)]
 
 
 async def _iter_listed_markets(client: Any, max_markets: int) -> list[Any]:
@@ -390,10 +424,57 @@ async def _fetch_books(client: Any, token_ids: Sequence[str]) -> Any:
         raise PublicApiError(f"public API is unreachable: {exc}") from exc
 
 
+async def fetch_book_batches(
+    client: Any,
+    token_ids: Sequence[str],
+    *,
+    batch_size: int = BOOK_BATCH_SIZE,
+    on_ok: Any = None,
+    on_fail: Any = None,
+    raise_if_all_fail: bool = True,
+) -> tuple[int, int]:
+    """Fetch books in small REST batches. Apply each batch. One fat payload must not kill the run.
+
+    Failed batch: call on_fail and continue. PublicApiError only when every
+    batch fails (and raise_if_all_fail). Empty token_ids is a no-op.
+    """
+    batches = chunk_ids(token_ids, batch_size)
+    if not batches:
+        return 0, 0
+    ok = 0
+    failed = 0
+    last_exc: BaseException | None = None
+    for batch in batches:
+        try:
+            books = await _fetch_books(client, batch)
+        except PublicApiError as exc:
+            failed += 1
+            last_exc = exc
+            if on_fail is not None:
+                result = on_fail(batch, exc)
+                if inspect.isawaitable(result):
+                    await result
+            continue
+        ok += 1
+        if on_ok is not None:
+            result = on_ok(books, batch)
+            if inspect.isawaitable(result):
+                await result
+    if ok == 0 and raise_if_all_fail:
+        detail = str(last_exc) if last_exc is not None else "every book batch failed"
+        raise PublicApiError(
+            f"public API is unreachable: every book batch failed ({detail})"
+        ) from last_exc
+    return ok, failed
+
+
 async def _updates(
     client: Any,
     token_ids: Sequence[str],
     poll_s: float,
+    *,
+    batch_size: int = BOOK_BATCH_SIZE,
+    on_batch_fail: Any = None,
 ) -> AsyncIterator[Any]:
     subscribe = getattr(client, "subscribe", None)
     if callable(subscribe):
@@ -411,7 +492,23 @@ async def _updates(
             raise PublicApiError(f"public API is unreachable: {exc}") from exc
         return
     while True:
-        yield await _fetch_books(client, token_ids)
+        ok = 0
+        last_exc: BaseException | None = None
+        for batch in chunk_ids(token_ids, batch_size):
+            try:
+                yield await _fetch_books(client, batch)
+                ok += 1
+            except PublicApiError as exc:
+                last_exc = exc
+                if on_batch_fail is not None:
+                    result = on_batch_fail(batch, exc)
+                    if inspect.isawaitable(result):
+                        await result
+        if ok == 0:
+            detail = str(last_exc) if last_exc is not None else "every book batch failed"
+            raise PublicApiError(
+                f"public API is unreachable: every book batch failed ({detail})"
+            ) from last_exc
         await asyncio.sleep(poll_s)
 
 
@@ -455,6 +552,9 @@ async def run_paper(
     max_markets: int = 20,
     once: bool = False,
     poll_s: float = 0.4,
+    book_batch_size: int = BOOK_BATCH_SIZE,
+    watch_pairs: int = WATCH_PAIRS,
+    watch_rotate_s: float = WATCH_ROTATE_S,
 ) -> PaperRunStats:
     """Hunt → risk → fee → paper executor. Never places live orders."""
     if settings.arb_mode == "live":
@@ -499,6 +599,10 @@ async def run_paper(
         by_token[pair.yes_token_id] = pair
         by_token[pair.no_token_id] = pair
     stats.universe = len(pairs)
+    batch_size = max(1, int(book_batch_size))
+    watch_n = max(1, int(watch_pairs))
+    rotate_s = float(watch_rotate_s)
+    stats.watching = min(len(pairs), watch_n)
     write_paper_stats(stats_path, stats)
 
     async def consider(pair: UniversePair) -> None:
@@ -550,20 +654,72 @@ async def run_paper(
             portfolio.open_pairs += 1
         write_paper_stats(stats_path, stats)
 
-    token_ids = [token for pair in pairs for token in (pair.yes_token_id, pair.no_token_id)]
-    if token_ids:
-        books = await _fetch_books(client, token_ids)
+    all_token_ids = pair_token_ids(pairs)
+
+    async def log_batch_fail(batch: list[str], exc: BaseException) -> None:
+        now_ms = _now_ms()
+        _append_jsonl(
+            rejects_path,
+            {
+                "ts_ms": now_ms,
+                "reason": "book_batch_failed",
+                "token_ids": list(batch),
+                "detail": f"{exc}"[:200],
+            },
+        )
+        _bump(stats, "book_batch_failed")
+        write_paper_stats(stats_path, stats)
+
+    async def apply_book_batch(books: Any, _batch: list[str]) -> None:
         now_ms = _now_ms()
         heartbeat.mark(now_ms)
-        _apply_update(store, books, now_ms)
+        try:
+            _apply_update(store, books, now_ms)
+        except InvalidOperation as exc:
+            payload = books[0] if isinstance(books, (list, tuple)) and books else books
+            token = str(getattr(payload, "token_id", "") or "")
+            _append_jsonl(
+                rejects_path,
+                {
+                    "ts_ms": now_ms,
+                    "token_id": token,
+                    "reason": "invalid_book_update",
+                    "detail": f"{type(exc).__name__}: {exc}"[:200],
+                },
+            )
+            _bump(stats, "invalid_book_update")
+            write_paper_stats(stats_path, stats)
+            return
         for pair in pairs:
             await consider(pair)
+        write_paper_stats(stats_path, stats)
 
-    if once or not token_ids:
+    if all_token_ids:
+        await fetch_book_batches(
+            client,
+            all_token_ids,
+            batch_size=batch_size,
+            on_ok=apply_book_batch,
+            on_fail=log_batch_fail,
+            raise_if_all_fail=True,
+        )
+
+    if once or not all_token_ids:
         write_paper_stats(stats_path, stats)
         return stats
 
     deadline = time.monotonic() + seconds
+    watch_offset = 0
+    rotated = asyncio.Event()
+
+    def current_watch_pairs() -> list[UniversePair]:
+        return watch_slice(pairs, watch_offset, watch_n)
+
+    def current_watch_tokens() -> list[str]:
+        return pair_token_ids(current_watch_pairs())
+
+    stats.watching = len(current_watch_pairs())
+    write_paper_stats(stats_path, stats)
 
     def trip_dead_stream() -> None:
         """Persist ws_stale. Never auto-resumes."""
@@ -611,9 +767,16 @@ async def run_paper(
             seen.add(pair.condition_id)
             await consider(pair)
 
-    async def consume() -> None:
+    async def consume_slice() -> None:
+        tokens = current_watch_tokens()
         try:
-            async for update in _updates(client, token_ids, poll_s):
+            async for update in _updates(
+                client,
+                tokens,
+                poll_s,
+                batch_size=batch_size,
+                on_batch_fail=log_batch_fail,
+            ):
                 await handle_update(update)
                 if time.monotonic() >= deadline:
                     return
@@ -624,6 +787,48 @@ async def run_paper(
             return
         if time.monotonic() < deadline:
             trip_dead_stream()
+
+    async def consume() -> None:
+        while time.monotonic() < deadline:
+            rotated.clear()
+            slice_task = asyncio.create_task(consume_slice())
+            rotate_wait = asyncio.create_task(rotated.wait())
+            remaining = deadline - time.monotonic()
+            done, pending = await asyncio.wait(
+                {slice_task, rotate_wait},
+                timeout=max(0.0, remaining),
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            for task in pending:
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
+            if slice_task in done and not slice_task.cancelled():
+                return
+            if not done:
+                return
+
+    async def rotate_watch() -> None:
+        nonlocal watch_offset
+        if len(pairs) <= watch_n or rotate_s <= 0:
+            return
+        while True:
+            await asyncio.sleep(rotate_s)
+            step = min(watch_n, len(pairs))
+            next_offset = (watch_offset + step) % len(pairs)
+            next_tokens = pair_token_ids(watch_slice(pairs, next_offset, watch_n))
+            await fetch_book_batches(
+                client,
+                next_tokens,
+                batch_size=batch_size,
+                on_ok=apply_book_batch,
+                on_fail=log_batch_fail,
+                raise_if_all_fail=False,
+            )
+            watch_offset = next_offset
+            stats.watching = len(current_watch_pairs())
+            write_paper_stats(stats_path, stats)
+            rotated.set()
 
     async def watch_silence() -> None:
         interval_s = max(0.02, min(poll_s, settings.ws_stale_ms / 1000))
@@ -642,15 +847,29 @@ async def run_paper(
             if stream_liveness_probe_due(
                 age_ms=age, ws_stale_ms=settings.ws_stale_ms
             ):
-                try:
-                    books = await asyncio.wait_for(
-                        _fetch_books(client, token_ids),
-                        timeout=probe_timeout_s,
-                    )
-                except (PublicApiError, TimeoutError, asyncio.TimeoutError):
+                probe_ok = 0
+
+                async def probe_ok_batch(books: Any, _batch: list[str]) -> None:
+                    nonlocal probe_ok
+                    probe_ok += 1
+                    await handle_update(books)
+
+                async def probe_one(batch: list[str]) -> None:
+                    try:
+                        books = await asyncio.wait_for(
+                            _fetch_books(client, batch),
+                            timeout=probe_timeout_s,
+                        )
+                    except (PublicApiError, TimeoutError, asyncio.TimeoutError) as exc:
+                        await log_batch_fail(batch, exc)
+                        return
+                    await probe_ok_batch(books, batch)
+
+                for batch in chunk_ids(current_watch_tokens(), batch_size):
+                    await probe_one(batch)
+                    write_paper_stats(stats_path, stats)
+                if probe_ok == 0:
                     trip_dead_stream()
-                    continue
-                await handle_update(books)
                 continue
             kill.evaluate(
                 daily_pnl=portfolio.daily_pnl,
@@ -659,6 +878,7 @@ async def run_paper(
             )
 
     watch = asyncio.create_task(watch_silence())
+    rotator = asyncio.create_task(rotate_watch())
     try:
         remaining = deadline - time.monotonic()
         finished_on_timeout = False
@@ -676,7 +896,10 @@ async def run_paper(
             now_ms=now_ms,
         )
     finally:
+        rotator.cancel()
         watch.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await rotator
         with contextlib.suppress(asyncio.CancelledError):
             await watch
     write_paper_stats(stats_path, stats)

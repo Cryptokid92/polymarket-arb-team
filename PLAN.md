@@ -56,6 +56,10 @@ Read-only local UI (`scripts/paper_ui.py`, stdlib `http.server`) watches gitigno
 
 Paginate every open market. Do not treat `--max-markets` as `page_size`. Subscribe only the v1 universe. Caps and universe rules stay tight. See `docs/plans/cursor-list-all-markets.md`.
 
+## Paper batch books + rotate watch (not Task 12)
+
+`--all-markets` listing is paginated; the hour-6 crash was one fat `get_order_books`. Batch REST books (50 token ids). Watch 40 pairs; rotate the rest. Do not raise `LIST_SAFETY_CAP`. See `docs/plans/cursor-batch-books-rotate.md`.
+
 ## Remaining
 
 12. Live path (build dark, do not run) — not now

@@ -223,6 +223,7 @@ def test_write_paper_stats_has_no_account_fields(tmp_path: Path) -> None:
         "intents": 1,
         "rejects": 2,
         "reject_reasons": {"stale": 2},
+        "watching": 0,
         "heartbeat_ms": 1_700_000_000_123,
     }
     blob = path.read_text(encoding="utf-8")

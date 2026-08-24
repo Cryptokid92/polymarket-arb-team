@@ -53,3 +53,11 @@ Paper list-all-markets (not Task 12): walk `list_markets` pages instead of one p
 - Plan: `docs/plans/cursor-list-all-markets.md`
 - `uv run pytest -q` — 146 passed
 - `ALLOW_LIVE` was not created. Live trading is not enabled. No secrets committed.
+
+Paper batch-books + rotate watch (not Task 12): hour-6 `--all-markets` listed 5000 / universe 1540, then one fat `get_order_books` died (`Payload exceeds the limit`). REST books now batch (50 token ids). Watch 40 pairs (80 tokens); rotate remaining every 90s. Failed batch logs and continues. `LIST_SAFETY_CAP` stays 5000. Universe/risk caps unchanged.
+
+- Plan: `docs/plans/cursor-batch-books-rotate.md`
+- Debug: `docs/debug-reports/2026-08-24-hour6-payload-limit.md`
+- Flags: `--book-batch-size`, `--watch-pairs`, `--watch-rotate-s`
+- `uv run pytest -q` — 158 passed
+- `ALLOW_LIVE` was not created. Live trading is not enabled. No secrets committed.
