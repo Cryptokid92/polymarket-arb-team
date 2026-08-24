@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import uuid
+from collections.abc import Sequence
 from dataclasses import dataclass
 from decimal import Decimal
 
@@ -150,4 +151,60 @@ class PaperLedger:
             daily_pnl=self.daily_pnl,
             path=intent.path,
             condition_id=condition_id,
+        )
+
+    async def settle_full_set(
+        self,
+        token_vwaps: Sequence[Decimal],
+        size: Decimal,
+        now_ms: int,
+        *,
+        event_id: str = "",
+        mode: str = "paper",
+    ) -> PaperFillResult:
+        if mode == "live":
+            raise RuntimeError("paper ledger will not fill live")
+        size = _require_decimal(d(size), "size")
+        vwaps = tuple(_require_decimal(d(v), "token_vwaps") for v in token_vwaps)
+        sum_v = sum(vwaps, _ZERO)
+        cost = size * sum_v
+        yes_vwap = vwaps[0] if vwaps else _ZERO
+        no_vwap = vwaps[1] if len(vwaps) > 1 else _ZERO
+        if cost > self.bankroll:
+            return PaperFillResult(
+                accepted=False,
+                reject_reason="insufficient_bankroll",
+                size=size,
+                yes_vwap=yes_vwap,
+                no_vwap=no_vwap,
+                pair_fees=_ZERO,
+                cost=cost,
+                pnl=_ZERO,
+                bankroll=self.bankroll,
+                daily_pnl=self.daily_pnl,
+                path="fullset_taker",
+                condition_id=event_id,
+            )
+
+        for i, vwap in enumerate(vwaps):
+            cid = f"paper-fullset-{i}-{uuid.uuid4()}"
+            self.store.record_fill(cid, event_id, size, vwap, now_ms)
+        pnl = size * (_ONE - sum_v)
+        self.bankroll = self.bankroll + pnl
+        self.daily_pnl = self.daily_pnl + pnl
+        self.store.set_bankroll(self.bankroll)
+        self.store.set_daily_pnl(self.daily_pnl)
+        return PaperFillResult(
+            accepted=True,
+            reject_reason=None,
+            size=size,
+            yes_vwap=yes_vwap,
+            no_vwap=no_vwap,
+            pair_fees=_ZERO,
+            cost=cost,
+            pnl=pnl,
+            bankroll=self.bankroll,
+            daily_pnl=self.daily_pnl,
+            path="fullset_taker",
+            condition_id=event_id,
         )

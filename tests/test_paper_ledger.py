@@ -208,3 +208,65 @@ def test_ledger_never_uses_float_or_secure_client() -> None:
         for node in ast.walk(tree):
             if isinstance(node, ast.Constant) and type(node.value) is float:
                 raise AssertionError(f"{helper.__name__} must not use float literals")
+
+
+@pytest.mark.asyncio
+async def test_settle_full_set_three_vwaps_pnl(tmp_path: Path) -> None:
+    store = StateStore(tmp_path / "state.sqlite")
+    ledger = PaperLedger(store, bankroll=d("500"), daily_pnl=d("0"))
+    result = await ledger.settle_full_set(
+        (d("0.40"), d("0.30"), d("0.28")),
+        d("5"),
+        now_ms=6_000,
+        event_id="evt-3way",
+    )
+    assert result.accepted is True
+    assert result.reject_reason is None
+    assert result.path == "fullset_taker"
+    assert result.size == Decimal("5")
+    assert result.cost == Decimal("4.90")
+    assert result.pnl == Decimal("0.10")
+    assert result.bankroll == Decimal("500.10")
+    assert result.daily_pnl == Decimal("0.10")
+    assert result.yes_vwap == Decimal("0.40")
+    assert result.no_vwap == Decimal("0.30")
+    assert result.condition_id == "evt-3way"
+    restored = store.restore()
+    assert restored.bankroll == Decimal("500.10")
+    assert restored.daily_pnl == Decimal("0.10")
+    assert len(restored.fills) == 3
+
+
+@pytest.mark.asyncio
+async def test_settle_full_set_live_mode_raises(tmp_path: Path) -> None:
+    store = StateStore(tmp_path / "state.sqlite")
+    ledger = PaperLedger(store, bankroll=d("500"), daily_pnl=d("0"))
+    with pytest.raises(RuntimeError, match="will not fill live"):
+        await ledger.settle_full_set(
+            (d("0.40"), d("0.30"), d("0.28")),
+            d("5"),
+            now_ms=7_000,
+            mode="live",
+        )
+
+
+@pytest.mark.asyncio
+async def test_settle_full_set_insufficient_bankroll(tmp_path: Path) -> None:
+    store = StateStore(tmp_path / "state.sqlite")
+    ledger = PaperLedger(store, bankroll=d("1"), daily_pnl=d("0"))
+    result = await ledger.settle_full_set(
+        (d("0.40"), d("0.30"), d("0.28")),
+        d("5"),
+        now_ms=8_000,
+        event_id="evt-3way",
+    )
+    assert result.accepted is False
+    assert result.reject_reason == "insufficient_bankroll"
+    assert result.path == "fullset_taker"
+    assert result.pnl == Decimal("0")
+    assert result.bankroll == Decimal("1")
+    assert result.daily_pnl == Decimal("0")
+    restored = store.restore()
+    assert restored.fills == []
+    assert restored.bankroll is None
+    assert ledger.bankroll == Decimal("1")
