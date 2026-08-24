@@ -48,6 +48,10 @@ Replay recorded asks+bids+depth (never last-trade or mid). Model one-leg FAK mis
 
 Tests: `uv run pytest -q`.
 
+## Paper dashboard (not Task 12) — done
+
+Read-only local UI (`scripts/paper_ui.py`, stdlib `http.server`) watches gitignored paper JSONL + optional `stats.json` / sqlite under `--data-dir` (default `data/paper`). Banner is paper-only. Binds `127.0.0.1:8765`. Missing logs show zeros. Never places orders. Not Task 12.
+
 ## Remaining
 
 12. Live path (build dark, do not run) — not now

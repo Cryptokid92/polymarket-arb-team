@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
@@ -145,6 +146,13 @@ async def test_paper_run_writes_gaps_and_intents_from_mock(tmp_path: Path) -> No
     assert stats.intents >= 1
     assert (tmp_path / "paper" / "gaps.jsonl").is_file()
     assert (tmp_path / "paper" / "intents.jsonl").is_file()
+    stats_path = tmp_path / "paper" / "stats.json"
+    assert stats_path.is_file()
+    snapshot = json.loads(stats_path.read_text(encoding="utf-8"))
+    assert snapshot["markets_listed"] == 1
+    assert snapshot["universe"] == 1
+    assert snapshot["gaps"] >= 1
+    assert snapshot["intents"] >= 1
     gaps = (tmp_path / "paper" / "gaps.jsonl").read_text(encoding="utf-8").strip()
     assert "raw_edge" in gaps
     intents = (tmp_path / "paper" / "intents.jsonl").read_text(encoding="utf-8").strip()
