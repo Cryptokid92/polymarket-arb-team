@@ -110,6 +110,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--data-dir", default="data/paper")
     parser.add_argument("--once", action="store_true", help="One list+book cycle, then exit")
     parser.add_argument(
+        "--neg-risk",
+        action="store_true",
+        help="paper-only full-set hunter for neg-risk events. Does not place live orders.",
+    )
+    parser.add_argument(
         "--place-orders",
         action="store_true",
         help="Rejected. This runner never places orders.",
@@ -162,6 +167,7 @@ async def _run(args: argparse.Namespace, settings, project_root: Path) -> int:
             book_batch_size=args.book_batch_size,
             watch_pairs=args.watch_pairs,
             watch_rotate_s=args.watch_rotate_s,
+            neg_risk=args.neg_risk,
         )
     except Exception as exc:
         print(f"paper_run: {exc}", file=sys.stderr)

@@ -683,6 +683,18 @@ def test_paper_run_cli_refuses_place_orders() -> None:
     assert module.main(["--place-orders"]) == 2
 
 
+def test_paper_run_cli_neg_risk_defaults_false() -> None:
+    module = _load_script("paper_run_cli_neg_risk_off", Path("scripts/paper_run.py"))
+    args = module.parse_args([])
+    assert args.neg_risk is False
+
+
+def test_paper_run_cli_neg_risk_flag_is_true() -> None:
+    module = _load_script("paper_run_cli_neg_risk_on", Path("scripts/paper_run.py"))
+    args = module.parse_args(["--neg-risk"])
+    assert args.neg_risk is True
+
+
 def test_stream_heartbeat_is_receive_age_not_book_age() -> None:
     beat = StreamHeartbeat()
     assert beat.age_ms(10_000) > 3000

@@ -568,6 +568,7 @@ async def run_paper(
     book_batch_size: int = BOOK_BATCH_SIZE,
     watch_pairs: int = WATCH_PAIRS,
     watch_rotate_s: float = WATCH_ROTATE_S,
+    neg_risk: bool = False,
 ) -> PaperRunStats:
     """Hunt → risk → fee → paper executor. Never places live orders."""
     if settings.arb_mode == "live":
