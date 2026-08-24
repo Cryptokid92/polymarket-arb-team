@@ -14,7 +14,7 @@ Protocol taker fee `C * feeRate * p * (1-p)`. Makers pay 0. Never include maker 
 
 Reconstruct YES/NO books from snapshots + `price_change` deltas. Walk ask depth (VWAP); do not size by mid or top-of-book only. Cursor: OK `2eaac20`.
 
-## Task 4 — Hunter
+## Task 4 — Hunter — done
 
 Emit `GapFound` only for depth-sized ask gaps (`yes_vwap + no_vwap <= 1 - min_edge` and fillable >= min_size). Uses asks, never mids. Tests: `uv run pytest tests/test_hunter.py tests/test_books.py tests/test_fees.py tests/test_money.py -q`.
 
