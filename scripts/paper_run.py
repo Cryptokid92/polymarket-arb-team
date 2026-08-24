@@ -3,6 +3,7 @@
 
 Usage:
   uv run python scripts/paper_run.py --seconds 3600
+  uv run python scripts/paper_run.py --all-markets --seconds 3600
   uv run python scripts/paper_run.py --once --data-dir /tmp/paper
 """
 
@@ -16,7 +17,7 @@ from pathlib import Path
 from polymarket import AsyncPublicClient
 from polymarket.streams import MarketSpec
 
-from arb.app import run_paper
+from arb.app import LIST_PAGE_SIZE, LIST_SAFETY_CAP, run_paper
 from arb.config import load_settings
 from arb.preflight import run_preflight
 
@@ -27,7 +28,7 @@ class OfficialPublicAdapter:
     def __init__(self, client: AsyncPublicClient) -> None:
         self._client = client
 
-    def list_markets(self, *, closed: bool = False, page_size: int = 20, **kwargs):
+    def list_markets(self, *, closed: bool = False, page_size: int = LIST_PAGE_SIZE, **kwargs):
         return self._client.list_markets(closed=closed, page_size=page_size, **kwargs)
 
     async def get_order_books(self, *, token_ids: list[str]):
@@ -40,12 +41,30 @@ class OfficialPublicAdapter:
         await self._client.close()
 
 
-def main(argv: list[str] | None = None) -> int:
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Paper runner: public books only. Refuses to place orders."
     )
     parser.add_argument("--seconds", type=int, default=3600, help="Run duration (default 3600)")
-    parser.add_argument("--max-markets", type=int, default=20)
+    parser.add_argument(
+        "--max-markets",
+        type=int,
+        default=20,
+        help=(
+            "Max listed markets to scan (default 20). "
+            "0 = no user cap; still stops at the documented safety ceiling "
+            f"({LIST_SAFETY_CAP})."
+        ),
+    )
+    parser.add_argument(
+        "--all-markets",
+        action="store_true",
+        help=(
+            "List every open market (same as --max-markets 0). "
+            f"Safety ceiling {LIST_SAFETY_CAP}. Universe filter still applies; "
+            "only v1 YES/NO pairs are subscribed."
+        ),
+    )
     parser.add_argument("--data-dir", default="data/paper")
     parser.add_argument("--once", action="store_true", help="One list+book cycle, then exit")
     parser.add_argument(
@@ -53,7 +72,18 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Rejected. This runner never places orders.",
     )
-    args = parser.parse_args(argv)
+    return parser.parse_args(argv)
+
+
+def resolve_max_markets(args: argparse.Namespace) -> int:
+    """`--all-markets` or `--max-markets 0` means no user cap (safety ceiling still applies)."""
+    if args.all_markets:
+        return 0
+    return int(args.max_markets)
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = parse_args(argv)
 
     if args.place_orders:
         print("paper_run: refuses to place orders", file=sys.stderr)
@@ -81,7 +111,7 @@ async def _run(args: argparse.Namespace, settings, project_root: Path) -> int:
             project_root=project_root,
             data_dir=Path(args.data_dir),
             seconds=args.seconds,
-            max_markets=args.max_markets,
+            max_markets=resolve_max_markets(args),
             once=args.once,
         )
     except Exception as exc:

@@ -13,8 +13,12 @@ import pytest
 from polymarket.models.clob.market_events import parse_market_event
 
 from arb.app import (
+    LIST_PAGE_SIZE,
+    LIST_SAFETY_CAP,
     PublicApiError,
     StreamHeartbeat,
+    _iter_listed_markets,
+    listing_limit,
     reject_universe,
     run_paper,
     stream_liveness_probe_due,
@@ -116,6 +120,63 @@ class _Paginator:
         return gen()
 
 
+class _PagedPaginator:
+    """Official-shaped paginator: `async for page in pages` yields `page.items`.
+
+    `iter_items` only yields the first page so a one-page `page_size=max_markets`
+    walk cannot pretend to have exhausted the catalog.
+    """
+
+    def __init__(self, pages: list[list[object]]) -> None:
+        self._pages = pages
+        self.pages_yielded = 0
+
+    def __aiter__(self):
+        return self._iter_pages()
+
+    async def _iter_pages(self):
+        for page in self._pages:
+            self.pages_yielded += 1
+            yield SimpleNamespace(items=tuple(page))
+
+    def iter_items(self):
+        async def gen():
+            if not self._pages:
+                return
+            self.pages_yielded += 1
+            for item in self._pages[0]:
+                yield item
+
+        return gen()
+
+
+class _PagedPublic:
+    def __init__(self, pages: list[list[object]]) -> None:
+        self.pages = pages
+        self.list_kwargs: dict[str, object] = {}
+        self.paginator: _PagedPaginator | None = None
+        self.book_token_ids: list[str] = []
+        self.subscribed_token_ids: list[str] = []
+
+    def list_markets(self, *, closed: bool = False, page_size: int = 20, **kwargs):
+        self.list_kwargs = {"closed": closed, "page_size": page_size, **kwargs}
+        self.paginator = _PagedPaginator(self.pages)
+        return self.paginator
+
+    async def get_order_books(self, *, token_ids: list[str]):
+        self.book_token_ids = list(token_ids)
+        return []
+
+    def subscribe(self, token_ids: list[str]):
+        self.subscribed_token_ids = list(token_ids)
+
+        async def gen():
+            if False:
+                yield []
+
+        return gen()
+
+
 class _MockPublic:
     def __init__(
         self,
@@ -130,6 +191,8 @@ class _MockPublic:
         self.fail_list = fail_list
         self.fail_books = fail_books
         self.book_calls = 0
+        self.book_token_ids: list[str] = []
+        self.subscribed_token_ids: list[str] = []
         self.list_kwargs: dict[str, object] = {}
 
     def list_markets(self, *, closed: bool = False, page_size: int = 20, **kwargs):
@@ -140,6 +203,7 @@ class _MockPublic:
 
     async def get_order_books(self, *, token_ids: list[str]):
         self.book_calls += 1
+        self.book_token_ids = list(token_ids)
         if self.fail_books:
             raise TimeoutError("timed out")
         return [self.books[tid] for tid in token_ids if tid in self.books]
@@ -160,6 +224,7 @@ class _SilentStreamPublic(_MockPublic):
     """Public client whose websocket stays open but never delivers another event."""
 
     def subscribe(self, token_ids: list[str]):
+        self.subscribed_token_ids = list(token_ids)
         return _keep_subscribe_open([])
 
 
@@ -349,6 +414,209 @@ def test_universe_filter_v1_rules() -> None:
         )
         == "short_crypto_window"
     )
+
+
+def test_listing_limit_zero_uses_safety_cap() -> None:
+    assert LIST_PAGE_SIZE == 100
+    assert LIST_SAFETY_CAP == 5000
+    assert listing_limit(20) == 20
+    assert listing_limit(80) == 80
+    assert listing_limit(0) == LIST_SAFETY_CAP
+    assert listing_limit(-1) == LIST_SAFETY_CAP
+    assert listing_limit(LIST_SAFETY_CAP + 1) == LIST_SAFETY_CAP
+
+
+def test_list_all_markets_does_not_loosen_universe_or_risk() -> None:
+    from arb.config import _EnvSettings
+
+    fields = _EnvSettings.model_fields
+    assert fields["stale_ms"].default == 400
+    assert fields["min_edge"].default == Decimal("0.01")
+    assert fields["max_gap"].default == Decimal("0.08")
+    source = Path("src/arb/app.py").read_text(encoding="utf-8")
+    assert "list_markets(closed=False, page_size=LIST_PAGE_SIZE)" in source
+    assert "list_markets(closed=False, page_size=max_markets)" not in source
+    assert "async for page in listed" in source
+    assert 'return "neg_risk"' in source
+    assert "seconds_delay" in source
+    assert "short_crypto_window" in source
+    assert "not_binary" in source
+
+
+@pytest.mark.asyncio
+async def test_iter_listed_markets_walks_pages_not_one_page_size() -> None:
+    pages = [
+        [
+            _market(condition_id="p0-a", yes_id="y0a", no_id="n0a"),
+            _market(condition_id="p0-b", yes_id="y0b", no_id="n0b"),
+        ],
+        [
+            _market(condition_id="p1-a", yes_id="y1a", no_id="n1a"),
+            _market(condition_id="p1-b", yes_id="y1b", no_id="n1b"),
+        ],
+        [
+            _market(condition_id="p2-a", yes_id="y2a", no_id="n2a"),
+            _market(condition_id="p2-b", yes_id="y2b", no_id="n2b"),
+        ],
+    ]
+    client = _PagedPublic(pages)
+    items = await _iter_listed_markets(client, 0)
+    assert [m.condition_id for m in items] == [
+        "p0-a",
+        "p0-b",
+        "p1-a",
+        "p1-b",
+        "p2-a",
+        "p2-b",
+    ]
+    assert client.list_kwargs["closed"] is False
+    assert client.list_kwargs["page_size"] == LIST_PAGE_SIZE
+    assert client.list_kwargs["page_size"] != 0
+    assert client.paginator is not None
+    assert client.paginator.pages_yielded == 3
+
+
+@pytest.mark.asyncio
+async def test_iter_listed_markets_user_cap_still_walks_pages() -> None:
+    pages = [
+        [_market(condition_id="p0-a"), _market(condition_id="p0-b")],
+        [_market(condition_id="p1-a"), _market(condition_id="p1-b")],
+        [_market(condition_id="p2-a"), _market(condition_id="p2-b")],
+    ]
+    client = _PagedPublic(pages)
+    items = await _iter_listed_markets(client, 3)
+    assert [m.condition_id for m in items] == ["p0-a", "p0-b", "p1-a"]
+    assert client.list_kwargs["page_size"] == LIST_PAGE_SIZE
+    assert client.list_kwargs["page_size"] != 3
+    assert client.paginator is not None
+    assert client.paginator.pages_yielded == 2
+
+
+@pytest.mark.asyncio
+async def test_iter_listed_markets_safety_cap_stops_walk(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("arb.app.LIST_SAFETY_CAP", 4)
+    pages = [
+        [_market(condition_id="p0-a"), _market(condition_id="p0-b")],
+        [_market(condition_id="p1-a"), _market(condition_id="p1-b")],
+        [_market(condition_id="p2-a"), _market(condition_id="p2-b")],
+    ]
+    client = _PagedPublic(pages)
+    items = await _iter_listed_markets(client, 0)
+    assert len(items) == 4
+    assert client.list_kwargs["page_size"] == LIST_PAGE_SIZE
+    assert client.paginator is not None
+    assert client.paginator.pages_yielded == 2
+
+
+@pytest.mark.asyncio
+async def test_max_markets_zero_lists_all_via_iter_items(tmp_path: Path) -> None:
+    markets = [
+        _market(condition_id=f"c{i}", yes_id=f"y{i}", no_id=f"n{i}") for i in range(5)
+    ]
+    client = _MockPublic(markets, {})
+    stats = await run_paper(
+        client=client,
+        settings=_settings(),
+        project_root=tmp_path,
+        data_dir=tmp_path / "paper",
+        max_markets=0,
+        once=True,
+    )
+    assert client.list_kwargs["page_size"] == LIST_PAGE_SIZE
+    assert stats.markets_listed == 5
+    assert stats.universe == 5
+
+
+@pytest.mark.asyncio
+async def test_listed_is_all_seen_universe_is_kept_and_books_are_v1_only(
+    tmp_path: Path,
+) -> None:
+    keep = _market(condition_id="keep", yes_id="yes-keep", no_id="no-keep")
+    neg = _market(condition_id="neg", yes_id="yes-neg", no_id="no-neg", neg_risk=True)
+    delay = _market(condition_id="delay", yes_id="yes-delay", no_id="no-delay", delay=3)
+    non_binary = _market(condition_id="nb", yes_id=None, no_id="no-nb")
+    short = _market(
+        condition_id="short",
+        yes_id="yes-short",
+        no_id="no-short",
+        slug="btc-updown-5m",
+        question="BTC up or down 5 minutes",
+        category="Crypto",
+    )
+    keep2 = _market(condition_id="keep2", yes_id="yes-keep2", no_id="no-keep2")
+    client = _PagedPublic([[keep, neg], [delay, non_binary], [short, keep2]])
+    stats = await run_paper(
+        client=client,
+        settings=_settings(),
+        project_root=tmp_path,
+        data_dir=tmp_path / "paper",
+        max_markets=0,
+        once=True,
+    )
+    assert stats.markets_listed == 6
+    assert stats.universe == 2
+    assert stats.rejects["neg_risk"] == 1
+    assert stats.rejects["seconds_delay"] == 1
+    assert stats.rejects["not_binary"] == 1
+    assert stats.rejects["short_crypto_window"] == 1
+    snapshot = json.loads((tmp_path / "paper" / "stats.json").read_text(encoding="utf-8"))
+    assert snapshot["markets_listed"] == 6
+    assert snapshot["universe"] == 2
+    assert snapshot["reject_reasons"]["neg_risk"] == 1
+    assert set(client.book_token_ids) == {
+        "yes-keep",
+        "no-keep",
+        "yes-keep2",
+        "no-keep2",
+    }
+    assert "yes-neg" not in client.book_token_ids
+    assert "yes-delay" not in client.book_token_ids
+    assert "yes-short" not in client.book_token_ids
+
+
+@pytest.mark.asyncio
+async def test_subscribe_only_v1_universe_token_pairs(tmp_path: Path) -> None:
+    keep = _market(condition_id="keep", yes_id="yes-gap-3c", no_id="no-gap-3c")
+    neg = _market(condition_id="neg", yes_id="yes-neg", no_id="no-neg", neg_risk=True)
+    client = _SilentStreamPublic(
+        [keep, neg],
+        {
+            "yes-gap-3c": _book("yes-gap-3c", "0.54", "0.55"),
+            "no-gap-3c": _book("no-gap-3c", "0.41", "0.42"),
+        },
+    )
+    await run_paper(
+        client=client,
+        settings=_settings(),
+        project_root=tmp_path,
+        data_dir=tmp_path / "paper",
+        max_markets=0,
+        once=False,
+        seconds=0.2,
+        poll_s=0.05,
+    )
+    assert client.book_token_ids == ["yes-gap-3c", "no-gap-3c"]
+    assert client.subscribed_token_ids == ["yes-gap-3c", "no-gap-3c"]
+    assert "yes-neg" not in client.subscribed_token_ids
+
+
+def test_paper_run_cli_all_markets_and_zero_mean_no_user_cap() -> None:
+    module = _load_script("paper_run_cli_all", Path("scripts/paper_run.py"))
+    args = module.parse_args(["--all-markets"])
+    assert module.resolve_max_markets(args) == 0
+    args = module.parse_args(["--max-markets", "0"])
+    assert module.resolve_max_markets(args) == 0
+    args = module.parse_args([])
+    assert module.resolve_max_markets(args) == 20
+    args = module.parse_args(["--max-markets", "80"])
+    assert module.resolve_max_markets(args) == 80
+    args = module.parse_args(["--max-markets", "80", "--all-markets"])
+    assert module.resolve_max_markets(args) == 0
+    source = Path("scripts/paper_run.py").read_text(encoding="utf-8")
+    assert "--all-markets" in source
+    assert "LIST_SAFETY_CAP" in source
 
 
 def test_paper_run_source_never_contains_secure_client() -> None:

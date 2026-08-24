@@ -1,6 +1,6 @@
-# Cursor review — paper dashboard only (not Task 12)
+# Cursor review — list all open markets (not Task 12)
 
-Review the read-only paper UI. Do **not** implement Task 12. Do **not** create `ALLOW_LIVE`.
+Review the paper catalog walk. Do **not** implement Task 12. Do **not** create `ALLOW_LIVE`.
 
 ## Run
 
@@ -17,28 +17,24 @@ uv run pytest -q
 - Do not call the live network in default tests.
 - Do not put an LLM in the hot path.
 - Do not commit secrets, `.env`, keys, paper fills, `data/`, sqlite, or paper JSONL with account data.
+- Do not loosen universe or risk: still refuse neg-risk, delay, non-binary, short crypto windows, `stale_ms`, `min_edge`, `max_gap`.
 
-## Check — paper UI
+## Check — list walk
 
-- `scripts/paper_ui.py` uses stdlib `http.server` + HTML (no new web deps).
-- Read-only: GET only; POST is 405.
-- Binds `127.0.0.1` (default port 8765). `--data-dir` and `--port` flags.
-- Banner: `PAPER MODE. Not live. Not financial advice.`
-- Missing JSONL → zeros / empty lists. Does not invent trades.
-- Shows run status (JSONL `ts_ms`, `stats.json` mtime, and `heartbeat_ms`), counts, reject reasons, recent gaps, recent intents, halt flag.
-- Fresh `stats.json` rewrite / heartbeat (seconds, not 11 minutes) is **running**. Stale does not invent a halt.
-- Auto-refresh every 2s.
-- Halt is inferred read-only from `HALT` and/or `state.sqlite`.
-- Source never contains `AsyncSecureClient`. `--place-orders` is refused.
+- `_iter_listed_markets` walks official pages (`async for page in listed` / `page.items`). It does **not** call `list_markets(page_size=max_markets)`.
+- `LIST_PAGE_SIZE = 100`. `LIST_SAFETY_CAP = 5000` is documented.
+- `--max-markets 0` and `--all-markets` mean no user cap (safety ceiling still applies). Default `--max-markets` stays 20.
+- `markets_listed` = all seen. `universe` = kept after `reject_universe`.
+- Subscribe / `get_order_books` only the kept v1 YES/NO token pairs. No neg-risk books.
+- README and `docs/guide/how-this-bot-works.md` mention `--all-markets`.
 
 ## Check — live gate
 
 - `live_allowed()` is still false without a human `ALLOW_LIVE` dated today, and false when `ARB_MODE=paper`.
-- `LiveBroker` still raises without the dual gate.
-- Paper UI / runner cannot place live orders.
+- Paper runner cannot place live orders.
 - No `ALLOW_LIVE` file in the repo.
 
 ## Check — docs
 
-- README documents `paper_run.py --seconds 3600` and `paper_ui.py --data-dir data/paper` in two terminals.
-- PLAN / PROGRESS mark this as a paper viz task, not Task 12.
+- `docs/plans/cursor-list-all-markets.md` plus the short debug note.
+- `docs/plans/README.md` lists both.
