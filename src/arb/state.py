@@ -17,6 +17,7 @@ class RestoredState:
     inventory: dict[str, tuple[Decimal, Decimal]]
     daily_pnl: Decimal
     halted: bool
+    halt_reason: str = ""
     client_order_ids: set[str] = field(default_factory=set)
 
 
@@ -76,8 +77,16 @@ class StateStore:
         ).fetchone()
         return default if row is None else row[0]
 
-    def set_halted(self, halted: bool) -> None:
-        self._set_meta("halted", "1" if halted else "0")
+    def set_halted(self, halted: bool, *, reason: str | None = None) -> None:
+        if halted:
+            already = self._get_meta("halted", "0") == "1"
+            stored_reason = self._get_meta("halt_reason", "")
+            if reason and (not already or not stored_reason):
+                self._set_meta("halt_reason", reason)
+            self._set_meta("halted", "1")
+            return
+        self._set_meta("halted", "0")
+        self._set_meta("halt_reason", "")
 
     def set_daily_pnl(self, pnl: Decimal) -> None:
         self._set_meta("daily_pnl", str(pnl))
@@ -200,5 +209,6 @@ class StateStore:
             inventory=inventory,
             daily_pnl=Decimal(self._get_meta("daily_pnl", "0")),
             halted=self._get_meta("halted", "0") == "1",
+            halt_reason=self._get_meta("halt_reason", ""),
             client_order_ids={row["client_order_id"] for row in open_orders},
         )

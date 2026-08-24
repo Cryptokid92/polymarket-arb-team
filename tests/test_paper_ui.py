@@ -115,12 +115,16 @@ def test_halt_from_readonly_sqlite(tmp_path: Path) -> None:
     conn = sqlite3.connect(db)
     conn.execute("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
     conn.execute("INSERT INTO meta(key, value) VALUES ('halted', '1')")
+    conn.execute("INSERT INTO meta(key, value) VALUES ('halt_reason', 'ws_stale')")
     conn.commit()
     conn.close()
     summary = ui.summarize_dashboard(paper, project_root=tmp_path, now_ms=1)
     assert summary["halt"]["sqlite_exists"] is True
     assert summary["halt"]["sqlite_halted"] is True
     assert summary["halt"]["halted"] is True
+    assert summary["halt"]["halt_reason"] == "ws_stale"
+    page = ui.render_html(summary)
+    assert "ws_stale" in page
 
 
 def test_html_banner_and_refresh() -> None:

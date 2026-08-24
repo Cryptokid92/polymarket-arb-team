@@ -23,7 +23,7 @@ class KillSwitch:
         self.settings = settings
 
     def trip(self, reason: str) -> None:
-        self.state.set_halted(True)
+        self.state.set_halted(True, reason=reason)
 
     def allow_new_intents(self) -> bool:
         if (self.project_root / "HALT").is_file():

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sqlite3
 from collections import Counter
 from decimal import Decimal
 from pathlib import Path
@@ -25,6 +26,28 @@ def _read_jsonl(path: Path) -> list[dict]:
             continue
         rows.append(json.loads(text))
     return rows
+
+
+def _halt_reason(data_dir: Path) -> str | None:
+    db = data_dir / "state.sqlite"
+    if not db.is_file():
+        return None
+    uri = f"file:{db.resolve().as_posix()}?mode=ro"
+    try:
+        conn = sqlite3.connect(uri, uri=True)
+    except sqlite3.Error:
+        return None
+    try:
+        row = conn.execute(
+            "SELECT value FROM meta WHERE key = ?", ("halt_reason",)
+        ).fetchone()
+    except sqlite3.Error:
+        return None
+    finally:
+        conn.close()
+    if row is None or not row[0]:
+        return None
+    return str(row[0])
 
 
 def summarize_paper(data_dir: Path) -> dict:
@@ -52,6 +75,7 @@ def summarize_paper(data_dir: Path) -> dict:
         "estimated_maker_ev": maker_ev,
         "estimated_taker_ev": taker_ev,
         "reject_reasons": dict(reasons),
+        "halt_reason": _halt_reason(data_dir),
     }
 
 
@@ -64,6 +88,9 @@ def format_report(stats: dict) -> str:
         f"  estimated taker EV: {stats['estimated_taker_ev']}",
         "  reject reasons:",
     ]
+    halt_reason = stats.get("halt_reason")
+    if halt_reason:
+        lines.insert(1, f"  halt reason: {halt_reason}")
     reasons = stats["reject_reasons"]
     if not reasons:
         lines.append("    (none)")

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import inspect
 import json
 import re
@@ -61,6 +62,23 @@ class PaperRunStats:
     gaps: int = 0
     intents: int = 0
     rejects: dict[str, int] = field(default_factory=dict)
+
+
+class StreamHeartbeat:
+    """Last stream/poll *receive* time. Distinct from CLOB Book.ts_ms."""
+
+    _NEVER_RECEIVED_AGE_MS = 10**15
+
+    def __init__(self) -> None:
+        self.last_receive_ms: int | None = None
+
+    def mark(self, now_ms: int) -> None:
+        self.last_receive_ms = now_ms
+
+    def age_ms(self, now_ms: int) -> int:
+        if self.last_receive_ms is None:
+            return self._NEVER_RECEIVED_AGE_MS
+        return max(0, now_ms - self.last_receive_ms)
 
 
 def run_pipeline(
@@ -373,6 +391,7 @@ async def run_paper(
     stats_path = data_dir / "stats.json"
     stats = PaperRunStats()
     store = BookStore()
+    heartbeat = StreamHeartbeat()
     broker = PaperBroker(log_path=intents_path)
     kill = KillSwitch(
         project_root=project_root,
@@ -416,7 +435,7 @@ async def run_paper(
         portfolio.halted = not kill.allow_new_intents()
         kill.evaluate(
             daily_pnl=portfolio.daily_pnl,
-            ws_age_ms=max(0, now_ms - min(yes.ts_ms, no.ts_ms)),
+            ws_age_ms=heartbeat.age_ms(now_ms),
             now_ms=now_ms,
         )
         portfolio.halted = not kill.allow_new_intents()
@@ -459,7 +478,9 @@ async def run_paper(
     token_ids = [token for pair in pairs for token in (pair.yes_token_id, pair.no_token_id)]
     if token_ids:
         books = await _fetch_books(client, token_ids)
-        _apply_update(store, books, _now_ms())
+        now_ms = _now_ms()
+        heartbeat.mark(now_ms)
+        _apply_update(store, books, now_ms)
         for pair in pairs:
             await consider(pair)
 
@@ -468,24 +489,58 @@ async def run_paper(
         return stats
 
     deadline = time.monotonic() + seconds
-    async for update in _updates(client, token_ids, poll_s):
-        _apply_update(store, update, _now_ms())
-        seen: set[str] = set()
-        if isinstance(update, (list, tuple)):
-            tokens = [str(getattr(book, "token_id", "")) for book in update]
-        else:
-            payload = getattr(update, "payload", update)
-            token = getattr(payload, "token_id", None)
-            tokens = [str(token)] if token else list(by_token)
-            for change in getattr(payload, "price_changes", ()) or ():
-                tokens.append(str(change.token_id))
-        for token in tokens:
-            pair = by_token.get(token)
-            if pair is None or pair.condition_id in seen:
-                continue
-            seen.add(pair.condition_id)
-            await consider(pair)
-        if time.monotonic() >= deadline:
-            break
+
+    async def consume() -> None:
+        async for update in _updates(client, token_ids, poll_s):
+            now_ms = _now_ms()
+            heartbeat.mark(now_ms)
+            _apply_update(store, update, now_ms)
+            seen: set[str] = set()
+            if isinstance(update, (list, tuple)):
+                tokens = [str(getattr(book, "token_id", "")) for book in update]
+            else:
+                payload = getattr(update, "payload", update)
+                token = getattr(payload, "token_id", None)
+                tokens = [str(token)] if token else list(by_token)
+                for change in getattr(payload, "price_changes", ()) or ():
+                    tokens.append(str(change.token_id))
+            for token in tokens:
+                pair = by_token.get(token)
+                if pair is None or pair.condition_id in seen:
+                    continue
+                seen.add(pair.condition_id)
+                await consider(pair)
+            if time.monotonic() >= deadline:
+                return
+
+    async def watch_silence() -> None:
+        interval_s = max(0.02, min(poll_s, settings.ws_stale_ms / 1000))
+        while True:
+            await asyncio.sleep(interval_s)
+            now_ms = _now_ms()
+            kill.evaluate(
+                daily_pnl=portfolio.daily_pnl,
+                ws_age_ms=heartbeat.age_ms(now_ms),
+                now_ms=now_ms,
+            )
+
+    watch = asyncio.create_task(watch_silence())
+    try:
+        remaining = deadline - time.monotonic()
+        if remaining > 0:
+            try:
+                await asyncio.wait_for(consume(), timeout=remaining)
+            except asyncio.TimeoutError:
+                pass
+        now_ms = _now_ms()
+        kill.evaluate(
+            daily_pnl=portfolio.daily_pnl,
+            ws_age_ms=heartbeat.age_ms(now_ms),
+            now_ms=now_ms,
+        )
+    finally:
+        watch.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await watch
     write_paper_stats(stats_path, stats)
     return stats
