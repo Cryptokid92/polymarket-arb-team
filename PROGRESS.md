@@ -59,4 +59,5 @@ Paper batch-books + rotate watch (not Task 12): hour-6 `--all-markets` listed 50
 - Plan: `docs/plans/cursor-batch-books-rotate.md`
 - Debug: `docs/debug-reports/2026-08-24-hour6-payload-limit.md`
 - Flags: `--book-batch-size`, `--watch-pairs`, `--watch-rotate-s`
+- `uv run pytest -q` — 158 passed
 - `ALLOW_LIVE` was not created. Live trading is not enabled. No secrets committed.
