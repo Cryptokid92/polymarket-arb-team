@@ -18,7 +18,7 @@ Reconstruct YES/NO books from snapshots + `price_change` deltas. Walk ask depth 
 
 Emit `GapFound` only for depth-sized ask gaps (`yes_vwap + no_vwap <= 1 - min_edge` and fillable >= min_size). Uses asks, never mids. Cursor: OK `b57f722`.
 
-## Task 5 — Risk agent
+## Task 5 — Risk agent — done
 
 Refuse halted, non-binary, delayed, neg-risk, stale, too-good, over-pair, daily-loss, uncompletable, and over-notional gaps. May clip size to `max_notional_per_trade` and re-walk both sides. Tests: `uv run pytest tests/test_risk.py tests/test_hunter.py tests/test_books.py tests/test_fees.py tests/test_money.py -q`.
 
