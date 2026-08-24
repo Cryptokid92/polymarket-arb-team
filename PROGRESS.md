@@ -36,8 +36,10 @@ Paper dashboard (not Task 12): read-only local UI to watch paper runner logs.
 
 - `scripts/paper_ui.py` — stdlib `http.server`, bind `127.0.0.1:8765`
 - Counts from `stats.json` (written by the paper runner) or JSONL
+- Run status follows `stats.json` mtime / `heartbeat_ms`, not only opening-scan JSONL timestamps
 - Reject-reason breakdown, recent gaps/intents, halt from `HALT` / `state.sqlite` (read-only)
 - Auto-refresh every 2s
 - Offline fixture tests under `tests/fixtures/paper_ui/`
-- `uv run pytest -q` — 110 passed
 - `ALLOW_LIVE` was not created. Live trading is not enabled. No secrets committed.
+
+Paper UI follows the runner (not Task 12): hour-5 showed stale while `paper_run` was up and rewriting `stats.json`. Last event now includes stats mtime and `heartbeat_ms`. Stale does not invent a halt.

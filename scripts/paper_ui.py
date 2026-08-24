@@ -76,7 +76,7 @@ def _file_mtime_ms(path: Path) -> int | None:
     if not path.is_file():
         return None
     try:
-        return int(path.stat().st_mtime * 1000)
+        return path.stat().st_mtime_ns // 1_000_000
     except OSError:
         return None
 
@@ -183,6 +183,11 @@ def read_halt(data_dir: Path, project_root: Path) -> dict[str, Any]:
     }
 
 
+def _latest_ms(*values: int | None) -> int | None:
+    found = [value for value in values if value is not None]
+    return max(found) if found else None
+
+
 def _infer_run_status(last_event_age_ms: int | None) -> str:
     if last_event_age_ms is None:
         return "no_data"
@@ -274,10 +279,11 @@ def summarize_dashboard(
         if mtime is not None and (last_mtime is None or mtime > last_mtime):
             last_mtime = mtime
 
-    if last_ts is not None:
-        last_event_age_ms = max(0, clock - last_ts)
-    elif last_mtime is not None:
-        last_event_age_ms = max(0, clock - last_mtime)
+    heartbeat_ms = _row_ts_ms({"ts_ms": stats.get("heartbeat_ms")}) if stats else None
+
+    last_activity_ms = _latest_ms(last_ts, heartbeat_ms, last_mtime)
+    if last_activity_ms is not None:
+        last_event_age_ms = max(0, clock - last_activity_ms)
     else:
         last_event_age_ms = None
 
@@ -287,6 +293,7 @@ def summarize_dashboard(
         "run_status": _infer_run_status(last_event_age_ms),
         "last_event_age_ms": last_event_age_ms,
         "last_log_mtime_ms": last_mtime,
+        "heartbeat_ms": heartbeat_ms,
         "counts": {
             "markets_listed": markets_listed,
             "universe": universe,

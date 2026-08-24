@@ -286,6 +286,8 @@ async def test_paper_run_writes_gaps_and_intents_from_mock(tmp_path: Path) -> No
     assert snapshot["universe"] == 1
     assert snapshot["gaps"] >= 1
     assert snapshot["intents"] >= 1
+    assert isinstance(snapshot["heartbeat_ms"], int)
+    assert snapshot["heartbeat_ms"] > 0
     gaps = (tmp_path / "paper" / "gaps.jsonl").read_text(encoding="utf-8").strip()
     assert "raw_edge" in gaps
     intents = (tmp_path / "paper" / "intents.jsonl").read_text(encoding="utf-8").strip()

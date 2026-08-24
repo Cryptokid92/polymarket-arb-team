@@ -290,7 +290,12 @@ def _bump(stats: PaperRunStats, reason: str) -> None:
     stats.rejects[reason] = stats.rejects.get(reason, 0) + 1
 
 
-def write_paper_stats(path: Path, stats: PaperRunStats) -> None:
+def write_paper_stats(
+    path: Path,
+    stats: PaperRunStats,
+    *,
+    now_ms: int | None = None,
+) -> None:
     """Atomic snapshot for the read-only paper UI. No account data."""
     payload = {
         "markets_listed": stats.markets_listed,
@@ -299,6 +304,7 @@ def write_paper_stats(path: Path, stats: PaperRunStats) -> None:
         "intents": stats.intents,
         "rejects": sum(stats.rejects.values()),
         "reject_reasons": dict(stats.rejects),
+        "heartbeat_ms": _now_ms() if now_ms is None else now_ms,
     }
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(path.name + ".tmp")
