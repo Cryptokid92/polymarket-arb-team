@@ -56,9 +56,9 @@ Writes gitignored JSONL (covered by `data/`):
 - `data/paper/gaps.jsonl` — hunter hits (edge, VWAPs, estimated maker/taker EV)
 - `data/paper/intents.jsonl` — paper-only approved intents (`PaperBroker`)
 - `data/paper/rejects.jsonl` — universe / risk / fee reject reasons
-- `data/paper/stats.json` — markets listed / universe / gap / intent / reject counts for the dashboard
+- `data/paper/stats.json` — markets listed / universe / gap / intent / reject counts plus `heartbeat_ms` for the dashboard
 
-`paper_ui.py` is read-only. If the JSONL files are missing it shows zeros and does not invent trades. Banner: **PAPER MODE. Not live. Not financial advice.** Auto-refreshes every 2s.
+`paper_ui.py` is read-only. If the JSONL files are missing it shows zeros and does not invent trades. Run status follows the newest JSONL timestamp, `stats.json` mtime, or `heartbeat_ms` — a live runner rewriting stats is **running**, not stale. Halt still comes only from `HALT` / sqlite. Banner: **PAPER MODE. Not live. Not financial advice.** Auto-refreshes every 2s.
 
 `report_paper.py` prints: gaps seen, intents approved, estimated maker EV, estimated taker EV, reject reasons.
 

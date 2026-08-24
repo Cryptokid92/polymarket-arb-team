@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
+import shutil
 import sqlite3
 import threading
 from http.client import HTTPConnection
@@ -10,6 +12,22 @@ from pathlib import Path
 from arb.app import PaperRunStats, write_paper_stats
 
 FIXTURES = Path(__file__).parent / "fixtures" / "paper_ui"
+FIXTURE_LAST_TS_MS = 1_700_000_001_500
+
+
+def _utime_ms(path: Path, ts_ms: int) -> None:
+    ns = ts_ms * 1_000_000
+    os.utime(path, ns=(ns, ns))
+
+
+def _copy_fixtures(tmp_path: Path, *, mtime_ms: int) -> Path:
+    dest = tmp_path / "paper_ui"
+    shutil.copytree(FIXTURES, dest)
+    for name in ("gaps.jsonl", "intents.jsonl", "rejects.jsonl", "stats.json"):
+        path = dest / name
+        if path.is_file():
+            _utime_ms(path, mtime_ms)
+    return dest
 
 
 def _load_script():
@@ -20,12 +38,13 @@ def _load_script():
     return module
 
 
-def test_summarize_fixture_counts() -> None:
+def test_summarize_fixture_counts(tmp_path: Path) -> None:
     ui = _load_script()
+    paper = _copy_fixtures(tmp_path, mtime_ms=FIXTURE_LAST_TS_MS)
     summary = ui.summarize_dashboard(
-        FIXTURES,
-        project_root=FIXTURES,
-        now_ms=1_700_000_001_500 + 120_000,
+        paper,
+        project_root=paper,
+        now_ms=FIXTURE_LAST_TS_MS + 120_000,
     )
     assert summary["banner"] == "PAPER MODE. Not live. Not financial advice."
     assert summary["mode"] == "paper"
@@ -73,6 +92,7 @@ def test_missing_logs_are_zeros_not_invented(tmp_path: Path) -> None:
     assert summary["recent_gaps"] == []
     assert summary["recent_intents"] == []
     assert summary["run_status"] == "no_data"
+    assert summary["heartbeat_ms"] is None
     assert summary["halt"]["halted"] is False
 
 
@@ -194,7 +214,7 @@ def test_source_stays_paper_only() -> None:
 def test_write_paper_stats_has_no_account_fields(tmp_path: Path) -> None:
     stats = PaperRunStats(markets_listed=7, universe=3, gaps=1, intents=1, rejects={"stale": 2})
     path = tmp_path / "stats.json"
-    write_paper_stats(path, stats)
+    write_paper_stats(path, stats, now_ms=1_700_000_000_123)
     payload = json.loads(path.read_text(encoding="utf-8"))
     assert payload == {
         "markets_listed": 7,
@@ -203,7 +223,134 @@ def test_write_paper_stats_has_no_account_fields(tmp_path: Path) -> None:
         "intents": 1,
         "rejects": 2,
         "reject_reasons": {"stale": 2},
+        "heartbeat_ms": 1_700_000_000_123,
     }
     blob = path.read_text(encoding="utf-8")
     for banned in ("private_key", "wallet", "secret", "api_key", "ALLOW_LIVE"):
         assert banned not in blob
+
+
+def test_fresh_stats_mtime_is_running_despite_old_rejects(tmp_path: Path) -> None:
+    """Hour-5: opening rejects are old; runner is still rewriting stats.json."""
+    ui = _load_script()
+    paper = tmp_path / "paper"
+    paper.mkdir()
+    old_ts = 1_700_000_000_000
+    now_ms = old_ts + 11 * 60 * 1000
+    (paper / "rejects.jsonl").write_text(
+        json.dumps({"ts_ms": old_ts, "reason": "neg_risk"}) + "\n",
+        encoding="utf-8",
+    )
+    (paper / "stats.json").write_text(
+        json.dumps(
+            {
+                "markets_listed": 80,
+                "universe": 2,
+                "gaps": 0,
+                "intents": 0,
+                "rejects": 78,
+                "reject_reasons": {"neg_risk": 78},
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    _utime_ms(paper / "rejects.jsonl", old_ts)
+    _utime_ms(paper / "stats.json", now_ms - 3_000)
+    summary = ui.summarize_dashboard(paper, project_root=tmp_path, now_ms=now_ms)
+    assert summary["run_status"] == "running"
+    assert summary["last_event_age_ms"] == 3_000
+    assert summary["halt"]["halted"] is False
+    assert summary["halt"]["halt_reason"] is None
+
+
+def test_stats_heartbeat_field_counts_as_event(tmp_path: Path) -> None:
+    ui = _load_script()
+    paper = tmp_path / "paper"
+    paper.mkdir()
+    old_ts = 1_700_000_000_000
+    now_ms = old_ts + 11 * 60 * 1000
+    heartbeat_ms = now_ms - 5_000
+    (paper / "rejects.jsonl").write_text(
+        json.dumps({"ts_ms": old_ts, "reason": "neg_risk"}) + "\n",
+        encoding="utf-8",
+    )
+    (paper / "stats.json").write_text(
+        json.dumps(
+            {
+                "markets_listed": 80,
+                "universe": 2,
+                "gaps": 0,
+                "intents": 0,
+                "rejects": 78,
+                "reject_reasons": {"neg_risk": 78},
+                "heartbeat_ms": heartbeat_ms,
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    _utime_ms(paper / "rejects.jsonl", old_ts)
+    _utime_ms(paper / "stats.json", old_ts)
+    summary = ui.summarize_dashboard(paper, project_root=tmp_path, now_ms=now_ms)
+    assert summary["run_status"] == "running"
+    assert summary["last_event_age_ms"] == 5_000
+    assert summary["heartbeat_ms"] == heartbeat_ms
+    assert summary["halt"]["halted"] is False
+
+
+def test_stale_logs_do_not_invent_halt(tmp_path: Path) -> None:
+    ui = _load_script()
+    paper = tmp_path / "paper"
+    paper.mkdir()
+    old_ts = 1_700_000_000_000
+    now_ms = old_ts + 11 * 60 * 1000
+    (paper / "rejects.jsonl").write_text(
+        json.dumps({"ts_ms": old_ts, "reason": "neg_risk"}) + "\n",
+        encoding="utf-8",
+    )
+    (paper / "stats.json").write_text(
+        json.dumps(
+            {
+                "markets_listed": 80,
+                "universe": 2,
+                "gaps": 0,
+                "intents": 0,
+                "rejects": 78,
+                "reject_reasons": {"neg_risk": 78},
+                "heartbeat_ms": old_ts,
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    _utime_ms(paper / "rejects.jsonl", old_ts)
+    _utime_ms(paper / "stats.json", old_ts)
+    summary = ui.summarize_dashboard(paper, project_root=tmp_path, now_ms=now_ms)
+    assert summary["run_status"] == "stale"
+    assert summary["last_event_age_ms"] == 11 * 60 * 1000
+    assert summary["halt"]["halted"] is False
+    assert summary["halt"]["halt_reason"] is None
+    page = ui.render_html(summary)
+    assert "stale" in page
+    assert "not halted" in page
+    assert "HALTED" not in page
+
+
+def test_halt_file_still_wins_when_stats_are_fresh(tmp_path: Path) -> None:
+    ui = _load_script()
+    paper = tmp_path / "paper"
+    paper.mkdir()
+    now_ms = 1_700_000_660_000
+    (tmp_path / "HALT").write_text("stop\n", encoding="utf-8")
+    write_paper_stats(
+        paper / "stats.json",
+        PaperRunStats(markets_listed=80, universe=2),
+        now_ms=now_ms - 2_000,
+    )
+    _utime_ms(paper / "stats.json", now_ms - 2_000)
+    summary = ui.summarize_dashboard(paper, project_root=tmp_path, now_ms=now_ms)
+    assert summary["run_status"] == "running"
+    assert summary["last_event_age_ms"] == 2_000
+    assert summary["halt"]["halted"] is True
+    assert summary["halt"]["halt_file"] is True

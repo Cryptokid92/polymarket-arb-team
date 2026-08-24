@@ -25,7 +25,8 @@ uv run pytest -q
 - Binds `127.0.0.1` (default port 8765). `--data-dir` and `--port` flags.
 - Banner: `PAPER MODE. Not live. Not financial advice.`
 - Missing JSONL → zeros / empty lists. Does not invent trades.
-- Shows run status (last log mtime / last event age), counts, reject reasons, recent gaps, recent intents, halt flag.
+- Shows run status (JSONL `ts_ms`, `stats.json` mtime, and `heartbeat_ms`), counts, reject reasons, recent gaps, recent intents, halt flag.
+- Fresh `stats.json` rewrite / heartbeat (seconds, not 11 minutes) is **running**. Stale does not invent a halt.
 - Auto-refresh every 2s.
 - Halt is inferred read-only from `HALT` and/or `state.sqlite`.
 - Source never contains `AsyncSecureClient`. `--place-orders` is refused.
