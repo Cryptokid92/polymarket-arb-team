@@ -96,6 +96,21 @@ def test_ws_stale_trips_switch(tmp_path: Path) -> None:
     ks = _switch(tmp_path)
     assert ks.evaluate(daily_pnl=d("0"), ws_age_ms=3001, now_ms=10_000) is False
     assert ks.state.restore().halted is True
+    assert ks.state.restore().halt_reason == "ws_stale"
+
+
+def test_trip_persists_halt_reason_and_does_not_overwrite(tmp_path: Path) -> None:
+    ks = _switch(tmp_path)
+    ks.trip("ws_stale")
+    assert ks.state.restore().halted is True
+    assert ks.state.restore().halt_reason == "ws_stale"
+    ks.trip("daily_loss")
+    assert ks.state.restore().halt_reason == "ws_stale"
+    assert ks.evaluate(daily_pnl=d("10"), ws_age_ms=0, now_ms=11_000) is False
+    assert ks.state.restore().halt_reason == "ws_stale"
+    assert ks.resume() is True
+    assert ks.allow_new_intents() is True
+    assert ks.state.restore().halt_reason == ""
 
 
 def test_three_hedge_incidents_per_hour_trip(tmp_path: Path) -> None:

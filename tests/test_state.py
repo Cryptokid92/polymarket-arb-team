@@ -26,10 +26,11 @@ def test_restore_round_trip_open_order_fill_inventory_pnl_halt(tmp_path: Path) -
     )
     store.set_inventory("0xmkt", d("10"), d("0"))
     store.set_daily_pnl(d("-1.25"))
-    store.set_halted(True)
+    store.set_halted(True, reason="ws_stale")
 
     restored = StateStore(path).restore()
     assert restored.halted is True
+    assert restored.halt_reason == "ws_stale"
     assert restored.daily_pnl == d("-1.25")
     assert restored.inventory["0xmkt"] == (d("10"), d("0"))
     assert "cid-yes-1" in restored.client_order_ids

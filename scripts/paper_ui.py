@@ -91,23 +91,33 @@ def _row_ts_ms(row: dict[str, Any]) -> int | None:
         return None
 
 
-def _sqlite_halted(path: Path) -> bool | None:
+def _sqlite_halt_info(path: Path) -> tuple[bool | None, str | None]:
     if not path.is_file():
-        return None
+        return None, None
     uri = f"file:{path.resolve().as_posix()}?mode=ro"
     try:
         conn = sqlite3.connect(uri, uri=True)
     except sqlite3.Error:
-        return None
+        return None, None
     try:
-        row = conn.execute("SELECT value FROM meta WHERE key = ?", ("halted",)).fetchone()
+        halted_row = conn.execute(
+            "SELECT value FROM meta WHERE key = ?", ("halted",)
+        ).fetchone()
+        reason_row = conn.execute(
+            "SELECT value FROM meta WHERE key = ?", ("halt_reason",)
+        ).fetchone()
     except sqlite3.Error:
-        return None
+        return None, None
     finally:
         conn.close()
-    if row is None:
-        return False
-    return str(row[0]) == "1"
+    if halted_row is None:
+        halted = False
+    else:
+        halted = str(halted_row[0]) == "1"
+    reason = str(reason_row[0]) if reason_row and reason_row[0] else None
+    if reason == "":
+        reason = None
+    return halted, reason
 
 
 def _halt_paths(data_dir: Path, project_root: Path) -> dict[str, Path]:
@@ -123,7 +133,7 @@ def _halt_paths(data_dir: Path, project_root: Path) -> dict[str, Path]:
 def read_halt(data_dir: Path, project_root: Path) -> dict[str, Any]:
     paths = _halt_paths(data_dir, project_root)
     halt_file = paths["halt_file"].is_file() or paths["halt_file_data"].is_file()
-    sqlite_hits: list[tuple[str, Path, bool | None]] = []
+    sqlite_hits: list[tuple[str, Path, bool | None, str | None]] = []
     seen: set[Path] = set()
     for label, path in (
         ("sqlite_data_dir", paths["sqlite_data_dir"]),
@@ -136,16 +146,27 @@ def read_halt(data_dir: Path, project_root: Path) -> dict[str, Any]:
         seen.add(resolved)
         if not path.is_file():
             continue
-        sqlite_hits.append((label, path, _sqlite_halted(path)))
+        halted, reason = _sqlite_halt_info(path)
+        sqlite_hits.append((label, path, halted, reason))
 
     sqlite_exists = bool(sqlite_hits)
-    sqlite_halted = any(flag is True for _, _, flag in sqlite_hits)
+    sqlite_halted = any(flag is True for _, _, flag, _reason in sqlite_hits)
+    halt_reason: str | None = None
+    for _label, _path, flag, reason in sqlite_hits:
+        if flag is True and reason:
+            halt_reason = reason
+            break
+    if halt_reason is None:
+        for _label, _path, _flag, reason in sqlite_hits:
+            if reason:
+                halt_reason = reason
+                break
     sources: list[str] = []
     if paths["halt_file"].is_file():
         sources.append("HALT")
     if paths["halt_file_data"].is_file():
         sources.append(str(paths["halt_file_data"]))
-    for _label, path, flag in sqlite_hits:
+    for _label, path, flag, _reason in sqlite_hits:
         if flag is True:
             sources.append(f"{path}:halted")
         elif flag is False:
@@ -157,6 +178,7 @@ def read_halt(data_dir: Path, project_root: Path) -> dict[str, Any]:
         "halt_file": halt_file,
         "sqlite_exists": sqlite_exists,
         "sqlite_halted": sqlite_halted if sqlite_exists else None,
+        "halt_reason": halt_reason,
         "sources": sources,
     }
 
@@ -332,6 +354,7 @@ def render_html(summary: dict[str, Any]) -> str:
     sources = ", ".join(halt.get("sources") or ()) or "none"
     sqlite_bit = "yes" if halt.get("sqlite_exists") else "no"
     halt_file_bit = "yes" if halt.get("halt_file") else "no"
+    halt_reason = halt.get("halt_reason") or "none"
     return f"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -368,6 +391,7 @@ def render_html(summary: dict[str, Any]) -> str:
       Run status: <strong>{_esc(summary["run_status"])}</strong>
       · last event {_esc(_age_label(summary.get("last_event_age_ms")))}
       · halt: <span class="{halt_class}">{halt_label}</span>
+      · halt reason: {_esc(halt_reason)}
       · HALT file: {halt_file_bit}
       · sqlite: {sqlite_bit}
       · sources: {_esc(sources)}

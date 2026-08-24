@@ -1,16 +1,19 @@
 from __future__ import annotations
 
+import asyncio
 import importlib.util
 import json
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
-from arb.app import PublicApiError, reject_universe, run_paper
+from arb.app import PublicApiError, StreamHeartbeat, reject_universe, run_paper
 from arb.config import Settings
 from arb.money import d
+from arb.state import StateStore
 
 
 def _load_script(name: str, path: Path):
@@ -72,14 +75,23 @@ def _market(
     )
 
 
-def _book(token_id: str, bid: str, ask: str, size: str = "80") -> SimpleNamespace:
+def _book(
+    token_id: str,
+    bid: str,
+    ask: str,
+    size: str = "80",
+    *,
+    timestamp: datetime | None = None,
+    ts_ms: int | None = None,
+) -> SimpleNamespace:
     return SimpleNamespace(
         token_id=token_id,
         bids=(SimpleNamespace(price=d(bid), size=d("20")),),
         asks=(SimpleNamespace(price=d(ask), size=d(size)),),
         tick_size=d("0.01"),
         min_order_size=d("5"),
-        timestamp=None,
+        timestamp=timestamp,
+        ts_ms=ts_ms,
         hash="fixture",
     )
 
@@ -121,6 +133,18 @@ class _MockPublic:
         if self.fail_books:
             raise TimeoutError("timed out")
         return [self.books[tid] for tid in token_ids if tid in self.books]
+
+
+class _SilentStreamPublic(_MockPublic):
+    """Public client whose websocket never delivers another event."""
+
+    def subscribe(self, token_ids: list[str]):
+        async def gen():
+            while True:
+                await asyncio.sleep(60)
+                yield []
+
+        return gen()
 
 
 @pytest.mark.asyncio
@@ -229,6 +253,91 @@ def test_paper_run_cli_refuses_place_orders() -> None:
     assert module.main(["--place-orders"]) == 2
 
 
+def test_stream_heartbeat_is_receive_age_not_book_age() -> None:
+    beat = StreamHeartbeat()
+    assert beat.age_ms(10_000) > 3000
+    beat.mark(9_900)
+    assert beat.age_ms(10_000) == 100
+    # CLOB book timestamps can be far older than the just-arrived snapshot.
+    book_age_ms = 10_000 - 1
+    assert book_age_ms > 3000
+    assert beat.age_ms(10_000) < book_age_ms
+
+
+@pytest.mark.asyncio
+async def test_old_clob_book_ts_does_not_trip_ws_stale(tmp_path: Path) -> None:
+    old = datetime.now(timezone.utc) - timedelta(seconds=10)
+    client = _MockPublic(
+        [_market()],
+        {
+            "yes-gap-3c": _book("yes-gap-3c", "0.54", "0.55", timestamp=old),
+            "no-gap-3c": _book("no-gap-3c", "0.41", "0.42", timestamp=old),
+        },
+    )
+    data_dir = tmp_path / "paper"
+    await run_paper(
+        client=client,
+        settings=_settings(),
+        project_root=tmp_path,
+        data_dir=data_dir,
+        once=True,
+    )
+    restored = StateStore(data_dir / "state.sqlite").restore()
+    assert restored.halted is False
+    assert restored.halt_reason == ""
+    source = Path("src/arb/app.py").read_text(encoding="utf-8")
+    assert "min(yes.ts_ms, no.ts_ms)" not in source
+
+
+@pytest.mark.asyncio
+async def test_poll_loop_old_book_ts_does_not_trip_ws_stale(tmp_path: Path) -> None:
+    old = datetime.now(timezone.utc) - timedelta(seconds=10)
+    client = _MockPublic(
+        [_market()],
+        {
+            "yes-gap-3c": _book("yes-gap-3c", "0.54", "0.55", timestamp=old),
+            "no-gap-3c": _book("no-gap-3c", "0.41", "0.42", timestamp=old),
+        },
+    )
+    data_dir = tmp_path / "paper"
+    await run_paper(
+        client=client,
+        settings=_settings(),
+        project_root=tmp_path,
+        data_dir=data_dir,
+        once=False,
+        seconds=0.4,
+        poll_s=0.1,
+    )
+    restored = StateStore(data_dir / "state.sqlite").restore()
+    assert restored.halted is False
+    assert restored.halt_reason == ""
+
+
+@pytest.mark.asyncio
+async def test_ws_silence_after_snapshot_trips_kill_switch(tmp_path: Path) -> None:
+    client = _SilentStreamPublic(
+        [_market()],
+        {
+            "yes-gap-3c": _book("yes-gap-3c", "0.54", "0.55"),
+            "no-gap-3c": _book("no-gap-3c", "0.41", "0.42"),
+        },
+    )
+    data_dir = tmp_path / "paper"
+    await run_paper(
+        client=client,
+        settings=_settings(ws_stale_ms=80),
+        project_root=tmp_path,
+        data_dir=data_dir,
+        once=False,
+        seconds=0.5,
+        poll_s=0.05,
+    )
+    restored = StateStore(data_dir / "state.sqlite").restore()
+    assert restored.halted is True
+    assert restored.halt_reason == "ws_stale"
+
+
 def test_report_paper_prints_stats(tmp_path: Path) -> None:
     paper = tmp_path / "paper"
     paper.mkdir()
@@ -257,3 +366,16 @@ def test_report_paper_prints_stats(tmp_path: Path) -> None:
     assert "estimated maker EV" in text
     assert "estimated taker EV" in text
     assert "stale: 2" in text
+    assert "halt reason" not in text
+
+
+def test_report_paper_reads_halt_reason(tmp_path: Path) -> None:
+    paper = tmp_path / "paper"
+    paper.mkdir()
+    store = StateStore(paper / "state.sqlite")
+    store.set_halted(True, reason="ws_stale")
+    module = _load_script("report_paper_cli", Path("scripts/report_paper.py"))
+    stats = module.summarize_paper(paper)
+    assert stats["halt_reason"] == "ws_stale"
+    text = module.format_report(stats)
+    assert "halt reason: ws_stale" in text
