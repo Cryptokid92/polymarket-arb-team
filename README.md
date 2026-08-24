@@ -38,9 +38,11 @@ uv run python scripts/paper_run.py --seconds 3600
 
 # All open markets (walks list_markets pages; safety ceiling 5000).
 # Still refuses neg-risk / delay / non-binary / short crypto windows.
-# Subscribes only the kept v1 YES/NO pairs.
+# REST books in batches of 50 token ids. Watches 40 pairs (80 tokens);
+# remaining universe pairs rotate every 90s. Do not subscribe all 1540.
 uv run python scripts/paper_run.py --all-markets --seconds 3600
 # equivalent: --max-markets 0
+# optional: --book-batch-size 50 --watch-pairs 40 --watch-rotate-s 90
 ```
 
 In another terminal, watch the gitignored logs (read-only local UI, binds `127.0.0.1:8765`):
@@ -73,8 +75,8 @@ Writes gitignored JSONL (covered by `data/`):
 These match the installed client in this repo. If they drift, follow the installed signatures:
 
 - `AsyncPublicClient.list_markets(closed=False, page_size=100)` — paginator; the runner walks pages (`async for page in pages`) until exhausted, `--max-markets`, or the 5000 safety ceiling. `--all-markets` / `--max-markets 0` means no user cap.
-- `get_order_books(token_ids=...)` — snapshot asks+bids+depth.
-- `subscribe(MarketSpec(token_ids=...))` **is** present. The runner subscribes to YES/NO token ids. If `subscribe` is missing on a future client, it polls `get_order_books` instead.
+- `get_order_books(token_ids=...)` — snapshot asks+bids+depth, **batched** (default `--book-batch-size 50`). A failed batch is logged; other batches continue. One fat payload must not kill the run.
+- `subscribe(MarketSpec(token_ids=...))` **is** present. The runner watches a first slice only (default `--watch-pairs 40` = 80 tokens) and rotates remaining universe pairs (`--watch-rotate-s 90`). If `subscribe` is missing on a future client, it polls `get_order_books` in the same batches.
 
 ## Layout
 

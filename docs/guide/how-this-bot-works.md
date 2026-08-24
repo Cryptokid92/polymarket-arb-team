@@ -40,7 +40,7 @@ One Python process. Specialists are functions, not separate services. There is a
 
 1. **List markets.** `AsyncPublicClient.list_markets(closed=False, page_size=100)`. Walk official pages until the catalog ends, `--max-markets`, or the documented safety ceiling (`5000`). Default `--max-markets` is 20 (tests). `--all-markets` or `--max-markets 0` means no user cap. `markets_listed` is every market seen; `universe` is what `reject_universe` kept. If the public API is unreachable, the runner exits with a clear error and does not fake gaps.
 2. **v1 universe filter.** Drop closed/archived, not accepting, neg-risk, delayed (`seconds_delay > 0`), missing YES/NO token ids, and 5/15-minute crypto windows (slug/question/tags matching crypto plus a 5 or 15 minute window).
-3. **Books.** REST snapshot of YES/NO token ids first (`get_order_books`). Then websocket `subscribe(MarketSpec(token_ids=...))` if the client has it; otherwise poll REST. `BookStore` applies snapshots and `price_change` deltas.
+3. **Books.** REST snapshot of kept YES/NO token ids in batches (`get_order_books`, default `--book-batch-size 50`). Apply each batch. A failed batch is logged (`book_batch_failed`) and skipped; `PublicApiError` only if every batch fails. Then websocket `subscribe(MarketSpec(token_ids=...))` on a first watch slice only (default `--watch-pairs 40` = 80 tokens). Remaining universe pairs rotate in every `--watch-rotate-s` seconds (default 90). If `subscribe` is missing, poll REST in the same batches. `BookStore` applies snapshots and `price_change` deltas. Do not subscribe all ~1540 pairs at once. Do not raise the listing safety ceiling as a books-payload fix.
 4. **Hunt.** `hunt()` walks both ask books. No gap → nothing else runs.
 5. **Risk.** `approve()` may clip size to `max_notional_per_trade` and re-walk both sides. Refusal reasons below.
 6. **Fees / intent.** `choose_intent()` prefers maker GTC. Taker FAK only if EV is still positive after protocol fees plus a `0.005`/share buffer.
@@ -135,7 +135,7 @@ Then:
 uv run python scripts/report_paper.py
 ```
 
-`--once` is one list+book cycle, then exit. `--place-orders` is rejected on both runner and UI.
+`--once` is one list+book cycle, then exit. `--place-orders` is rejected on both runner and UI. `--all-markets` walks listing pages (ceiling 5000). `--book-batch-size`, `--watch-pairs`, and `--watch-rotate-s` cap REST/WS payloads; they do not loosen universe or risk.
 
 Logs are gitignored under `data/` (default `data/paper/`):
 
@@ -182,7 +182,11 @@ Six-agent Cursor debug was still in flight when that report was filed. Hour runn
 
 ### Scans
 
-Public API connected. `--max-markets 80` was one page, mostly `neg_risk`, so `listed=80` / `universe=1–2` was not the full catalog. `--all-markets` walks pages (ceiling 5000) and still filters the v1 universe before subscribe. No gaps in those early runs. This host is geoblocked for live (US/AZ). Paper skips geoblock. Do not treat this host as a live venue.
+Public API connected. `--max-markets 80` was one page, mostly `neg_risk`, so `listed=80` / `universe=1–2` was not the full catalog. `--all-markets` walks pages (ceiling 5000) and still filters the v1 universe. Hour-6 then died on one `get_order_books` of ~3080 token ids (`Payload exceeds the limit`). Books are now batched (50 ids); the hour watch is a 40-pair slice that rotates. No gaps in those early runs. This host is geoblocked for live (US/AZ). Paper skips geoblock. Do not treat this host as a live venue.
+
+### Hour-6 crash — fat `get_order_books` payload
+
+`--all-markets` listed 5000 / universe 1540 / 3460 rejects (3352 `neg_risk`). Then one REST books call for every universe token id failed: `public API is unreachable: Payload exceeds the limit`. Process exited. No hour watch. Listing pagination was fine; do not raise `LIST_SAFETY_CAP`. See [hour-6 payload](../debug-reports/2026-08-24-hour6-payload-limit.md).
 
 ## Where the code lives
 

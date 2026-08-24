@@ -5,6 +5,7 @@ Usage:
   uv run python scripts/paper_run.py --seconds 3600
   uv run python scripts/paper_run.py --all-markets --seconds 3600
   uv run python scripts/paper_run.py --once --data-dir /tmp/paper
+  uv run python scripts/paper_run.py --all-markets --book-batch-size 50 --watch-pairs 40 --watch-rotate-s 90
 """
 
 from __future__ import annotations
@@ -17,7 +18,14 @@ from pathlib import Path
 from polymarket import AsyncPublicClient
 from polymarket.streams import MarketSpec
 
-from arb.app import LIST_PAGE_SIZE, LIST_SAFETY_CAP, run_paper
+from arb.app import (
+    BOOK_BATCH_SIZE,
+    LIST_PAGE_SIZE,
+    LIST_SAFETY_CAP,
+    WATCH_PAIRS,
+    WATCH_ROTATE_S,
+    run_paper,
+)
 from arb.config import load_settings
 from arb.preflight import run_preflight
 
@@ -61,8 +69,36 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help=(
             "List every open market (same as --max-markets 0). "
-            f"Safety ceiling {LIST_SAFETY_CAP}. Universe filter still applies; "
-            "only v1 YES/NO pairs are subscribed."
+            f"Safety ceiling {LIST_SAFETY_CAP}. Universe filter still applies. "
+            f"REST books are batched ({BOOK_BATCH_SIZE} token ids). "
+            f"Watch first {WATCH_PAIRS} pairs; rotate every {WATCH_ROTATE_S}s."
+        ),
+    )
+    parser.add_argument(
+        "--book-batch-size",
+        type=int,
+        default=BOOK_BATCH_SIZE,
+        help=(
+            f"Token ids per get_order_books call (default {BOOK_BATCH_SIZE}). "
+            "Official CLOB rejects fat payloads; do not send the whole universe."
+        ),
+    )
+    parser.add_argument(
+        "--watch-pairs",
+        type=int,
+        default=WATCH_PAIRS,
+        help=(
+            f"YES/NO pairs to subscribe/poll at once (default {WATCH_PAIRS} = "
+            f"{WATCH_PAIRS * 2} tokens). Remaining universe pairs rotate in."
+        ),
+    )
+    parser.add_argument(
+        "--watch-rotate-s",
+        type=float,
+        default=WATCH_ROTATE_S,
+        help=(
+            f"Seconds between watch-slice rotations (default {WATCH_ROTATE_S}). "
+            "0 disables rotation."
         ),
     )
     parser.add_argument("--data-dir", default="data/paper")
@@ -113,6 +149,9 @@ async def _run(args: argparse.Namespace, settings, project_root: Path) -> int:
             seconds=args.seconds,
             max_markets=resolve_max_markets(args),
             once=args.once,
+            book_batch_size=args.book_batch_size,
+            watch_pairs=args.watch_pairs,
+            watch_rotate_s=args.watch_rotate_s,
         )
     except Exception as exc:
         print(f"paper_run: {exc}", file=sys.stderr)
