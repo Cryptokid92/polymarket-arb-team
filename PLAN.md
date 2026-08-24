@@ -16,11 +16,14 @@ Reconstruct YES/NO books from snapshots + `price_change` deltas. Walk ask depth 
 
 ## Task 4 — Hunter — done
 
-Emit `GapFound` only for depth-sized ask gaps (`yes_vwap + no_vwap <= 1 - min_edge` and fillable >= min_size). Uses asks, never mids. Tests: `uv run pytest tests/test_hunter.py tests/test_books.py tests/test_fees.py tests/test_money.py -q`.
+Emit `GapFound` only for depth-sized ask gaps (`yes_vwap + no_vwap <= 1 - min_edge` and fillable >= min_size). Uses asks, never mids. Cursor: OK `b57f722`.
+
+## Task 5 — Risk agent
+
+Refuse halted, non-binary, delayed, neg-risk, stale, too-good, over-pair, daily-loss, uncompletable, and over-notional gaps. May clip size to `max_notional_per_trade` and re-walk both sides. Tests: `uv run pytest tests/test_risk.py tests/test_hunter.py tests/test_books.py tests/test_fees.py tests/test_money.py -q`.
 
 ## Remaining (paper only)
 
-5. Risk agent
 6. Fee agent
 7. Paper executor + bus wiring
 8. Merge + naked-leg hedge (simulated)
