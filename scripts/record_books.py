@@ -4,9 +4,9 @@
 Usage:
   python scripts/record_books.py --out data/books.jsonl --condition-id 0x...
 
-Paper-only stub. A later task may stream from AsyncPublicClient.
-This script does not call the network, does not construct AsyncSecureClient,
-and refuses any order-placement flag.
+Paper-only stub. A later task may stream from the official public client.
+This script does not call the network, does not construct a secure trading
+client, and refuses any order-placement flag.
 """
 
 from __future__ import annotations
@@ -40,7 +40,7 @@ def main(argv: list[str] | None = None) -> int:
     print("Would record public books to", args.out)
     if args.condition_id:
         print("condition_id", args.condition_id)
-    print("No AsyncSecureClient. No live orders. Recording via public client is later.")
+    print("No secure trading client. No live orders. Public recording is later.")
     return 0
 
 

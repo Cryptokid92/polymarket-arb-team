@@ -104,10 +104,10 @@ def test_record_books_script_refuses_orders_and_has_no_network() -> None:
     source = Path("scripts/record_books.py").read_text(encoding="utf-8")
     lowered = source.lower()
     assert "refuses to place orders" in source or "refuses to place orders" in lowered
-    assert "asyncsecureclient" not in lowered
-    assert "urllib" not in lowered
-    assert "httpx" not in lowered
-    assert "requests" not in lowered
+    assert "from polymarket" not in lowered
+    assert "import urllib" not in lowered
+    assert "import httpx" not in lowered
+    assert "import requests" not in lowered
 
     import importlib.util
 

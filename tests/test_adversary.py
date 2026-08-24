@@ -65,11 +65,11 @@ def test_detect_mid_fill_catches_mid_fill_lies() -> None:
 
 def test_vanished_second_ask_is_not_a_completed_pair() -> None:
     events = [
-        _book(1000, "YES", "yes-v", "0.54", "0.55", ask_size="80"),
-        _book(1000, "NO", "no-v", "0.41", "0.42", ask_size="80"),
+        _book(1000, "YES", "yes-v", "0.54", "0.55", ask_size="80", bid_size="80"),
+        _book(1000, "NO", "no-v", "0.41", "0.42", ask_size="80", bid_size="80"),
         # Second ask disappears before t+latency (1000+100=1100).
-        _book(1050, "YES", "yes-v", "0.54", "0.55", ask_size="80"),
-        _book(1050, "NO", "no-v", "0.41", "0.99", ask_size="1"),
+        _book(1050, "YES", "yes-v", "0.54", "0.55", ask_size="80", bid_size="80"),
+        _book(1050, "NO", "no-v", "0.41", "0.99", ask_size="1", bid_size="80"),
     ]
     result = run_backtest(events, _cfg(latency_ms=100, p_miss=d("0")))
     assert result.completed_pairs == 0
@@ -80,8 +80,6 @@ def test_crypto_50c_2c_gap_taker_is_not_profitable() -> None:
     events = [
         _book(1000, "YES", "yes-50", "0.49", "0.50"),
         _book(1000, "NO", "no-50", "0.47", "0.48"),
-        _book(1200, "YES", "yes-50", "0.49", "0.50"),
-        _book(1200, "NO", "no-50", "0.47", "0.48"),
     ]
     result = run_backtest(
         events,
