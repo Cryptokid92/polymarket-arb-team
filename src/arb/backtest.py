@@ -1,0 +1,376 @@
+"""Replay recorded books. Fill on ask/bid depth, never last-trade or mid."""
+
+from __future__ import annotations
+
+import random
+from collections.abc import Sequence
+from dataclasses import dataclass, field
+from decimal import Decimal
+from typing import Literal
+
+from arb.books import Book, Level, _reject_float, walk_asks
+from arb.fees import pair_taker_fees, taker_fee
+from arb.hunter import hunt
+from arb.merge import mergeable
+from arb.naked_leg import hedge_plan
+from arb.recorder import BookFrame, frames_from_events
+
+_ONE = Decimal("1")
+_ZERO = Decimal("0")
+
+
+def walk_bids(bids: list[Level], shares: Decimal) -> tuple[Decimal, Decimal] | None:
+    """Sell `shares` into bids (best first). None if depth is insufficient."""
+    shares = _reject_float(shares, "shares")
+    if shares <= 0:
+        return None
+    remaining = shares
+    notional = _ZERO
+    for level in bids:
+        if level.size <= 0:
+            continue
+        take = remaining if remaining <= level.size else level.size
+        notional += take * level.price
+        remaining -= take
+        if remaining == 0:
+            return (notional / shares, shares)
+    return None
+
+
+def _best_bid(book: Book) -> Decimal:
+    return book.bids[0].price if book.bids else _ZERO
+
+
+def _best_ask(book: Book) -> Decimal:
+    return book.asks[0].price if book.asks else _ONE
+
+
+def _ask_size_at(book: Book, price: Decimal) -> Decimal:
+    return sum((lvl.size for lvl in book.asks if lvl.price == price), _ZERO)
+
+
+class _MissRng:
+    def __init__(self, seed: int) -> None:
+        self._rng = random.Random(seed)
+
+    def second_fak_misses(self, p_miss: Decimal) -> bool:
+        p_miss = _reject_float(p_miss, "p_miss")
+        if p_miss <= _ZERO:
+            return False
+        if p_miss >= _ONE:
+            return True
+        thresh = int(p_miss * Decimal("10000"))
+        return self._rng.randrange(10000) < thresh
+
+
+@dataclass
+class BacktestConfig:
+    path: Literal["taker_fak", "maker_gtc"] = "taker_fak"
+    p_miss: Decimal = Decimal("0.3")
+    latency_ms: int = 100
+    maker_rest_ms: int = 400
+    hedge_slippage: Decimal = Decimal("0.01")
+    fee_rate_yes: Decimal = Decimal("0")
+    fee_rate_no: Decimal = Decimal("0")
+    min_edge: Decimal = Decimal("0.01")
+    min_size: Decimal = Decimal("5")
+    max_shares: Decimal = Decimal("80")
+    starting_capital: Decimal = Decimal("100")
+    rng_seed: int = 0
+
+
+@dataclass
+class FillRecord:
+    ts_ms: int
+    decision_ts_ms: int
+    book_ts_ms: int
+    side: Literal["YES", "NO"]
+    size: Decimal
+    price: Decimal
+    kind: str
+    fill_source: Literal["ask", "bid", "mid"]
+    best_bid: Decimal
+    best_ask: Decimal
+    ask_vwap: Decimal | None
+
+
+@dataclass
+class DecisionRecord:
+    t_ms: int
+    yes_book_ts_ms: int
+    no_book_ts_ms: int
+
+
+@dataclass
+class BacktestResult:
+    trades: int
+    completed_pairs: int
+    naked_incidents: int
+    net_pnl: Decimal
+    capital_turns: Decimal
+    fills: list[FillRecord] = field(default_factory=list)
+    decisions: list[DecisionRecord] = field(default_factory=list)
+
+
+def _frame_at_or_before(frames: Sequence[BookFrame], ts_ms: int) -> BookFrame | None:
+    chosen: BookFrame | None = None
+    for frame in frames:
+        if frame.ts_ms <= ts_ms:
+            chosen = frame
+        else:
+            break
+    return chosen
+
+
+def _buy_fill(
+    *,
+    book: Book,
+    size: Decimal,
+    ts_ms: int,
+    decision_ts_ms: int,
+    side: Literal["YES", "NO"],
+    kind: str,
+) -> FillRecord | None:
+    walked = walk_asks(book.asks, size)
+    if walked is None:
+        return None
+    vwap, _filled = walked
+    return FillRecord(
+        ts_ms=ts_ms,
+        decision_ts_ms=decision_ts_ms,
+        book_ts_ms=book.ts_ms,
+        side=side,
+        size=size,
+        price=vwap,
+        kind=kind,
+        fill_source="ask",
+        best_bid=_best_bid(book),
+        best_ask=_best_ask(book),
+        ask_vwap=vwap,
+    )
+
+
+def _maker_side_fills(
+    posted: Book,
+    now: Book,
+    limit: Decimal,
+    rested: bool,
+) -> bool:
+    if not rested:
+        return False
+    if not now.asks:
+        return False
+    if now.bids and now.bids[0].price >= limit:
+        return True
+    if _ask_size_at(now, limit) < _ask_size_at(posted, limit):
+        return True
+    # Simple rest model: still at or through our limit after rest → fill.
+    return now.asks[0].price <= limit
+
+
+def _hedge_fill(
+    *,
+    book: Book,
+    size: Decimal,
+    side: Literal["YES", "NO"],
+    ts_ms: int,
+    decision_ts_ms: int,
+    slippage: Decimal,
+) -> tuple[FillRecord, Decimal]:
+    walked = walk_bids(book.bids, size)
+    bid_vwap = walked[0] if walked is not None else _ZERO
+    px = bid_vwap - slippage
+    if px < _ZERO:
+        px = _ZERO
+    fill = FillRecord(
+        ts_ms=ts_ms,
+        decision_ts_ms=decision_ts_ms,
+        book_ts_ms=book.ts_ms,
+        side=side,
+        size=size,
+        price=px,
+        kind="hedge",
+        fill_source="bid",
+        best_bid=_best_bid(book),
+        best_ask=_best_ask(book),
+        ask_vwap=None,
+    )
+    return fill, px * size
+
+
+def run_backtest(
+    events: Sequence[dict],
+    config: BacktestConfig | None = None,
+) -> BacktestResult:
+    cfg = config or BacktestConfig()
+    frames = frames_from_events(events)
+    rng = _MissRng(cfg.rng_seed)
+    fills: list[FillRecord] = []
+    decisions: list[DecisionRecord] = []
+    completed = 0
+    naked = 0
+    trades = 0
+    pnl = _ZERO
+    buy_notional = _ZERO
+    kind = cfg.path
+
+    i = 0
+    while i < len(frames):
+        frame = frames[i]
+        decisions.append(
+            DecisionRecord(
+                t_ms=frame.ts_ms,
+                yes_book_ts_ms=frame.yes.ts_ms,
+                no_book_ts_ms=frame.no.ts_ms,
+            )
+        )
+        gap = hunt(
+            frame.yes,
+            frame.no,
+            cfg.min_edge,
+            cfg.min_size,
+            cfg.max_shares,
+            now_ms=frame.ts_ms,
+        )
+        if gap is None:
+            i += 1
+            continue
+
+        delay = cfg.maker_rest_ms if cfg.path == "maker_gtc" else cfg.latency_ms
+        exec_ts = frame.ts_ms + delay
+        exec_frame = _frame_at_or_before(frames, exec_ts) or frame
+        size = gap.fillable_shares
+
+        if cfg.path == "maker_gtc":
+            rested = exec_ts - frame.ts_ms >= cfg.maker_rest_ms
+            yes_ok = _maker_side_fills(
+                frame.yes, exec_frame.yes, gap.yes_vwap, rested
+            )
+            no_ok = _maker_side_fills(frame.no, exec_frame.no, gap.no_vwap, rested)
+            yes_fill = (
+                _buy_fill(
+                    book=exec_frame.yes,
+                    size=size,
+                    ts_ms=exec_ts,
+                    decision_ts_ms=frame.ts_ms,
+                    side="YES",
+                    kind=kind,
+                )
+                if yes_ok
+                else None
+            )
+            no_fill = (
+                _buy_fill(
+                    book=exec_frame.no,
+                    size=size,
+                    ts_ms=exec_ts,
+                    decision_ts_ms=frame.ts_ms,
+                    side="NO",
+                    kind=kind,
+                )
+                if no_ok
+                else None
+            )
+        else:
+            yes_fill = _buy_fill(
+                book=exec_frame.yes,
+                size=size,
+                ts_ms=exec_ts,
+                decision_ts_ms=frame.ts_ms,
+                side="YES",
+                kind=kind,
+            )
+            no_fill = None
+            if yes_fill is not None and not rng.second_fak_misses(cfg.p_miss):
+                no_fill = _buy_fill(
+                    book=exec_frame.no,
+                    size=size,
+                    ts_ms=exec_ts,
+                    decision_ts_ms=frame.ts_ms,
+                    side="NO",
+                    kind=kind,
+                )
+
+        if yes_fill is None and no_fill is None:
+            i += 1
+            continue
+
+        trades += 1
+        yes_sz = yes_fill.size if yes_fill is not None else _ZERO
+        no_sz = no_fill.size if no_fill is not None else _ZERO
+        if yes_fill is not None:
+            fills.append(yes_fill)
+            buy_notional += yes_fill.price * yes_fill.size
+        if no_fill is not None:
+            fills.append(no_fill)
+            buy_notional += no_fill.price * no_fill.size
+
+        fees = _ZERO
+        if cfg.path == "taker_fak":
+            if yes_fill is not None:
+                fees += taker_fee(yes_fill.size, yes_fill.price, cfg.fee_rate_yes)
+            if no_fill is not None:
+                fees += taker_fee(no_fill.size, no_fill.price, cfg.fee_rate_no)
+
+        merged = mergeable(yes_sz, no_sz)
+        if merged > _ZERO and yes_fill is not None and no_fill is not None:
+            pair_fees = (
+                pair_taker_fees(
+                    merged,
+                    yes_fill.price,
+                    merged,
+                    no_fill.price,
+                    cfg.fee_rate_yes,
+                    cfg.fee_rate_no,
+                )
+                if cfg.path == "taker_fak"
+                else _ZERO
+            )
+            pnl += merged - (yes_fill.price * merged) - (no_fill.price * merged)
+            pnl -= pair_fees
+            completed += 1
+            leftover_yes = yes_sz - merged
+            leftover_no = no_sz - merged
+            fees = _ZERO  # already applied as pair_fees
+        else:
+            leftover_yes = yes_sz
+            leftover_no = no_sz
+            pnl -= fees
+
+        plan = hedge_plan(leftover_yes, leftover_no)
+        if plan is not None:
+            naked += 1
+            hedge_book = exec_frame.yes if plan.side == "YES" else exec_frame.no
+            buy_px = (
+                yes_fill.price
+                if plan.side == "YES" and yes_fill is not None
+                else no_fill.price
+                if no_fill is not None
+                else _ZERO
+            )
+            hedge, proceeds = _hedge_fill(
+                book=hedge_book,
+                size=plan.size,
+                side=plan.side,
+                ts_ms=exec_ts,
+                decision_ts_ms=frame.ts_ms,
+                slippage=cfg.hedge_slippage,
+            )
+            fills.append(hedge)
+            pnl += proceeds - (buy_px * plan.size)
+
+        i += 1
+        while i < len(frames) and frames[i].ts_ms <= exec_ts:
+            i += 1
+
+    capital = cfg.starting_capital
+    turns = buy_notional / capital if capital > _ZERO else _ZERO
+    return BacktestResult(
+        trades=trades,
+        completed_pairs=completed,
+        naked_incidents=naked,
+        net_pnl=pnl,
+        capital_turns=turns,
+        fills=fills,
+        decisions=decisions,
+    )
