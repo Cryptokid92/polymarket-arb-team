@@ -1,0 +1,14 @@
+# Debug reports
+
+Write-ups after a halt, crash, review, or paper run. Plans live in `docs/plans/`.
+
+Do not commit paper JSONL, sqlite, `.env`, or keys.
+
+| File | When | What |
+|---|---|---|
+| [2026-08-24-paper-scans.md](2026-08-24-paper-scans.md) | Hour-1 and hour-2 paper scans | Public API counts. No gaps. |
+| [2026-08-24-paper-hour1-halt.md](2026-08-24-paper-hour1-halt.md) | Hour-1 halt | Book age wired as WS age. |
+| [2026-08-24-cursor-review-ws-age.md](2026-08-24-cursor-review-ws-age.md) | After Grok `5010bbf` | Cursor pass, merged `42e4384`. |
+| [2026-08-24-paper-hour2-ws-decimal-crash.md](2026-08-24-paper-hour2-ws-decimal-crash.md) | Hour-2 runner death | Bad WS book field → ConversionSyntax. |
+
+The six-agent Cursor debug report is not in yet (agent still running).
