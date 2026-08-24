@@ -1,15 +1,19 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
 
+from arb.books import Book, BookStore
 from arb.config import Settings
 from arb.hunter import hunt
 from arb.killswitch import KillSwitch
 from arb.money import d
 from arb.risk import MarketFlags, Portfolio, approve
 from arb.state import StateStore
-from tests.test_risk import _gap_3c, _load_pair
+
+FIXTURES = Path(__file__).parent / "fixtures" / "books"
+MIN_EDGE = d("0.01")
 
 
 def _settings(**overrides: Any) -> Settings:
@@ -43,6 +47,21 @@ def _portfolio(**overrides: Any) -> Portfolio:
     )
     base.update(overrides)
     return Portfolio(**base)
+
+
+def _load_pair(name: str) -> tuple[Book, Book, dict[str, Any]]:
+    payload = json.loads((FIXTURES / name).read_text(encoding="utf-8"))
+    store = BookStore()
+    yes = store.apply_snapshot(payload["yes"])
+    no = store.apply_snapshot(payload["no"])
+    return yes, no, payload
+
+
+def _gap_3c():
+    yes, no, payload = _load_pair("gap_3c.json")
+    found = hunt(yes, no, MIN_EDGE, yes.min_order_size, d(payload["max_shares"]), now_ms=1000)
+    assert found is not None
+    return found
 
 
 def _switch(tmp_path: Path, settings: Settings | None = None) -> KillSwitch:
