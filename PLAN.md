@@ -10,7 +10,7 @@ Repo layout, MIT license, paper-default `Settings`, Decimal money helpers, dual 
 
 Protocol taker fee `C * feeRate * p * (1-p)`. Makers pay 0. Never include maker rebates in EV. Cursor: OK `0c890a1`.
 
-## Task 3 — Book store + ask walk
+## Task 3 — Book store + ask walk — done
 
 Reconstruct YES/NO books from snapshots + `price_change` deltas. Walk ask depth (VWAP); do not size by mid or top-of-book only. Tests: `uv run pytest tests/test_books.py tests/test_fees.py tests/test_money.py -q`.
 
