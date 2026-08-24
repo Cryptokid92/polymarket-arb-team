@@ -1,11 +1,11 @@
-# Cursor review — Task 5 only
+# Cursor review — Task 6 only
 
-Review the Task 5 risk-agent commit. Do not implement Tasks 6–12.
+Review the Task 6 fee-agent commit. Do not implement Tasks 7–12.
 
 ## Run
 
 ```bash
-uv run pytest tests/test_risk.py tests/test_hunter.py tests/test_books.py tests/test_fees.py tests/test_money.py -q
+uv run pytest tests/test_fee_agent.py tests/test_risk.py tests/test_hunter.py tests/test_books.py tests/test_fees.py tests/test_money.py -q
 ```
 
 ## Do not
@@ -15,11 +15,13 @@ uv run pytest tests/test_risk.py tests/test_hunter.py tests/test_books.py tests/
 - Do not place live orders.
 - Do not put an LLM in the hot path.
 - Do not commit secrets, `.env`, keys, paper fills, or state databases.
+- Do not add maker rebates to EV.
 
 ## Check
 
-- One pass: `gap_3c` + healthy flags + empty portfolio + default settings (may clip notional).
-- Hard rejects: halted, not binary, not accepting orders, `seconds_delay > 0`, `neg_risk`, stale book (`stale_one_side.json`), `raw_edge > max_gap`, `open_pairs` cap, daily loss, uncompletable walk, notional that cannot clip.
-- `delayed_market.json` is used for the delay reject.
-- After a clip, both sides are re-walked at the same size.
+- Crypto 3¢ gap at 0.55/0.42 with `fee_rate` 0.07: `maker_gtc` approved, taker EV <= 0.
+- Fee-free 3¢ gap: both EV positive; still prefer maker.
+- Both EV <= 0 → `None`.
+- `yes_limit` / `no_limit` are ask VWAPs.
+- Only hardcoded extra is `Decimal("0.005")` per-share taker buffer.
 - Decimal only.

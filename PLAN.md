@@ -20,11 +20,14 @@ Emit `GapFound` only for depth-sized ask gaps (`yes_vwap + no_vwap <= 1 - min_ed
 
 ## Task 5 — Risk agent — done
 
-Refuse halted, non-binary, delayed, neg-risk, stale, too-good, over-pair, daily-loss, uncompletable, and over-notional gaps. May clip size to `max_notional_per_trade` and re-walk both sides. Tests: `uv run pytest tests/test_risk.py tests/test_hunter.py tests/test_books.py tests/test_fees.py tests/test_money.py -q`.
+Refuse halted, non-binary, delayed, neg-risk, stale, too-good, over-pair, daily-loss, uncompletable, and over-notional gaps. May clip size to `max_notional_per_trade` and re-walk both sides. Cursor: OK `c3fc647`.
+
+## Task 6 — Fee agent
+
+Prefer `maker_gtc` when maker EV > 0. Allow `taker_fak` only if taker EV > 0 after protocol fees + `0.005`/share buffer. Rebates never in EV. Tests: `uv run pytest tests/test_fee_agent.py tests/test_risk.py tests/test_hunter.py tests/test_books.py tests/test_fees.py tests/test_money.py -q`.
 
 ## Remaining (paper only)
 
-6. Fee agent
 7. Paper executor + bus wiring
 8. Merge + naked-leg hedge (simulated)
 9. Kill switch, state dump, preflight
