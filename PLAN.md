@@ -6,7 +6,7 @@ Not financial advice. No guaranteed PnL. Do not enable live trading. Do not crea
 
 Repo layout, MIT license, paper-default `Settings`, Decimal money helpers, dual live gate. Cursor: OK `15db598`.
 
-## Task 2 — Fees (pure function)
+## Task 2 — Fees (pure function) — done
 
 Protocol taker fee `C * feeRate * p * (1-p)`. Makers pay 0. Never include maker rebates in EV. Official table rounding (100 crypto @ $0.01 → $0.07). Tests: `uv run pytest tests/test_fees.py tests/test_money.py -q`.
 
