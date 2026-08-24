@@ -1,0 +1,20 @@
+---
+description: Hard rules for the paper-first Polymarket completeness-arb bot
+alwaysApply: true
+---
+
+# Polymarket completeness-arb — hard rules
+
+- Paper is the default. Do not enable live trading.
+- Never create `ALLOW_LIVE`.
+- Never place live orders.
+- Never commit secrets, `.env`, keys, paper fills, or state databases.
+- Money uses `Decimal` only. Never use `float` for prices, sizes, notional, edge, or PnL.
+- No LLM in the hot path (pricing, sizing, order placement, hedge, cancel).
+- Official SDK only: `polymarket-client` (`from polymarket import AsyncPublicClient, AsyncSecureClient`).
+- One writer at a time.
+- Grok implements / Cursor reviews.
+- LIVE_TRADING requires `ARB_MODE=live` AND a human-created `ALLOW_LIVE` file containing today's ISO date.
+- Makers pay 0. Never hardcode fees.
+- A half-filled arb is worse than no trade.
+- Do not scrape influencer wallets.

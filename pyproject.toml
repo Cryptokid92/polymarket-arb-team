@@ -1,0 +1,32 @@
+[project]
+name = "arb"
+version = "0.1.0"
+description = "Paper-first Polymarket completeness-arb bot. Not financial advice."
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.11,<3.14"
+authors = [
+    { name = "Nikolai Kirkhaug" },
+]
+dependencies = [
+    "polymarket-client",
+    "pydantic",
+    "pydantic-settings",
+    "pytest",
+    "pytest-asyncio",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/arb"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+asyncio_mode = "auto"
+
+[tool.uv]
+package = true
