@@ -1,0 +1,22 @@
+{
+  "yes": {
+    "token_id": "yes-stale-one",
+    "bids": [{"price": "0.54", "size": "10"}],
+    "asks": [{"price": "0.55", "size": "20"}],
+    "tick": "0.01",
+    "min_order_size": "5",
+    "ts_ms": 10000,
+    "hash": "yes-stale-one-v1"
+  },
+  "no": {
+    "token_id": "no-stale-one",
+    "bids": [{"price": "0.41", "size": "10"}],
+    "asks": [{"price": "0.42", "size": "20"}],
+    "tick": "0.01",
+    "min_order_size": "5",
+    "ts_ms": 1000,
+    "hash": "no-stale-one-v1"
+  },
+  "stale_ms": 400,
+  "now_ms": 10000
+}

@@ -1,0 +1,21 @@
+{
+  "yes": {
+    "token_id": "yes-thin",
+    "bids": [{"price": "0.51", "size": "3"}],
+    "asks": [{"price": "0.52", "size": "3"}],
+    "tick": "0.01",
+    "min_order_size": "5",
+    "ts_ms": 1000,
+    "hash": "yes-thin-v1"
+  },
+  "no": {
+    "token_id": "no-thin",
+    "bids": [{"price": "0.42", "size": "3"}],
+    "asks": [{"price": "0.43", "size": "3"}],
+    "tick": "0.01",
+    "min_order_size": "5",
+    "ts_ms": 1000,
+    "hash": "no-thin-v1"
+  },
+  "max_shares": "80"
+}

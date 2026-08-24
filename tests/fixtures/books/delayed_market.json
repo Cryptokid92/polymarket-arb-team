@@ -1,0 +1,23 @@
+{
+  "yes": {
+    "token_id": "yes-delayed",
+    "bids": [{"price": "0.54", "size": "10"}],
+    "asks": [{"price": "0.55", "size": "20"}],
+    "tick": "0.01",
+    "min_order_size": "5",
+    "ts_ms": 1000,
+    "hash": "yes-delayed-v1"
+  },
+  "no": {
+    "token_id": "no-delayed",
+    "bids": [{"price": "0.41", "size": "10"}],
+    "asks": [{"price": "0.42", "size": "20"}],
+    "tick": "0.01",
+    "min_order_size": "5",
+    "ts_ms": 1000,
+    "hash": "no-delayed-v1"
+  },
+  "market_ts_ms": 500,
+  "now_ms": 10000,
+  "stale_ms": 400
+}
