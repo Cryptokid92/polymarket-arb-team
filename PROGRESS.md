@@ -71,5 +71,5 @@ Paper trading helper (not Task 12): closest-book / near-miss JSONL + stats, `rec
 
 - `uv run pytest -q` — 216 passed
 - Plan: `docs/plans/cursor-paper-trading-helper.md`
-- Evidence: `docs/debug-reports/2026-08-27-paper-evidence.md`
+- Evidence: `docs/debug-reports/2026-08-27-paper-evidence.md` — 1-hour `--all-markets` finished (`listed=5000` / `universe=1546` / `gaps=0` / best walked edge `-0.001`). Same-market tape: 0 trades, verdict `non_positive`. Stop. Do not loosen `min_edge`. Task 12 stays dark.
 - `ALLOW_LIVE` was not created. Live trading is not enabled. No secrets committed.

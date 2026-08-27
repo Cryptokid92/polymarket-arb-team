@@ -12,59 +12,76 @@ ARB_MODE=paper uv run python scripts/paper_run.py --all-markets --seconds 3600 -
 
 `data/paper-evidence/` is gitignored. Not committed.
 
-## Opening scan
+## Hour result (final)
 
-- `markets_listed`: 5000 (safety ceiling)
-- `universe`: 1546
-- `gaps`: 0
-- `intents` / `alerts` / `fills`: 0
-- `watching`: 40
-- rejects: `neg_risk` 3329, `not_accepting` 56, `seconds_delay` 68, `short_crypto_window` 1
-- First closest walked edge: about `-0.05`
+Process reached `paper_run done`. Pid file cleared. No fat-payload death. No WS Decimal crash.
 
-Process stayed up after listing and batched books. No fat-payload death. No WS Decimal crash in the opening window.
+```text
+listed=5000 universe=1546 gaps=0 intents=0
+rejects={'neg_risk': 3329, 'not_accepting': 56, 'seconds_delay': 68, 'short_crypto_window': 1}
+bankroll=500 daily_pnl=0
+```
 
-## Mid-hour (process still running)
+From final `stats.json` / `report_paper.py`:
 
-Around minute 46–47:
+| Field | Value |
+|---|---|
+| markets_listed | 5000 |
+| universe | 1546 |
+| watching | 40 |
+| gaps | 0 |
+| intents / alerts / fills | 0 |
+| completed_pairs / naked_incidents | 0 |
+| best_edge | `-0.001` |
+| closest_fillable | 5 |
+| closest_in_watch | false |
+| closest_thin | false |
+| nearmiss_considers | 1_078_540 |
+| books.jsonl events | 58_376 |
+| nearmiss.jsonl rows | 11 (new-best only) |
 
-- `gaps`: 0
-- `best_edge`: `-0.001` (one tenth of a cent short of completeness; still below `min_edge` 0.01)
-- `closest_fillable`: 5
-- `closest_in_watch`: false
-- `nearmiss_considers`: ~787k
-- histogram: most walks `lt_-0.05`; a few thousand in `-0.01_0`; no `0_0.005` or better
-- `books.jsonl`: ~43k events
-- `nearmiss.jsonl`: 11 rows (new-best only; no non-negative walked edge)
+Edge histogram (walked asks):
 
-Hunt did not fire. Near-miss is why the hour is not "dead": books are walked, and the closest pair never reached a 1¢ completeness gap.
+| Bucket | Count |
+|---|---|
+| `lt_-0.05` | 1_058_353 |
+| `-0.05_-0.02` | 9_736 |
+| `-0.02_-0.01` | 2_064 |
+| `-0.01_0` | 5_624 |
+| `0_0.005` or better | 0 |
+| `none` (thin) | 2_763 |
+
+Closest pair: `0xe70dc5791fd703624bdd33fbdd6c4374bf51723c4c5e2fb88ee87857dc72d762` (not in the watch slice). One tenth of a cent short of completeness. Still below `min_edge` 0.01. Hunt did not fire.
 
 Caps were not loosened.
 
+## Halt at exit
+
+sqlite: `halted=1`, `halt_reason=ws_stale`. stderr: `WebSocket heartbeat stale; closing`. There was no `HALT` file.
+
+The process still printed `paper_run done` after the 3600s window. This is an end-of-stream / quiet-socket close, not a mid-hour Decimal crash. Do **not** raise `ws_stale_ms`. Quote staleness stays `stale_ms=400`.
+
 ## Honest tape backtest
 
-First replay mixed YES from market A with NO from market B (`frames_from_events` was global). That invented 106 fake trades and −109 paper PnL. That was a lie.
-
-Fix: group frames by `condition_id`. Same-market replay of this tape:
+`frames_from_events` groups by `condition_id`. YES from one market is never hunted against NO from another.
 
 ```text
-events: 43874
+events: 58376
 trades: 0
 completed pairs: 0
 naked incidents: 0
 net pnl: 0
+capital turns: 0
 verdict: non_positive
+stop: net EV is not positive. Do not loosen risk. Do not go live.
 ```
 
-**Stop.** Do not loosen `min_edge`. Do not treat a silent completeness hour as a reason to build or enable Task 12.
-
 ```bash
+uv run python scripts/report_paper.py --data-dir data/paper-evidence
 uv run python scripts/backtest_tape.py --tape data/paper-evidence/books.jsonl
 ```
 
-## Hour result
-
-Filled when the 3600s window exits (halt reason, final histogram, whether the process stayed up).
+**Stop.** Do not loosen `min_edge`. Do not treat a silent completeness hour as a reason to build or enable Task 12.
 
 ## Task 12
 
