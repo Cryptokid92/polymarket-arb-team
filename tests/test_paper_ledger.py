@@ -195,6 +195,75 @@ async def test_live_mode_is_refused(tmp_path: Path) -> None:
         await ledger.try_fill(_maker_intent(d("10")), CRYPTO, now_ms=5_000, mode="live")
 
 
+@pytest.mark.asyncio
+async def test_honest_taker_miss_is_naked_hedge(tmp_path: Path) -> None:
+    yes, no, _payload = _load_pair("gap_3c.json")
+    store = StateStore(tmp_path / "state.sqlite")
+    ledger = PaperLedger(
+        store,
+        bankroll=d("500"),
+        daily_pnl=d("0"),
+        honest=True,
+        p_miss=d("1"),
+        rng_seed=1,
+        hedge_slippage=d("0.01"),
+    )
+    result = await ledger.try_fill(
+        _taker_intent(d("10")), CRYPTO, now_ms=6_000, yes=yes, no=no
+    )
+    assert result.accepted is True
+    assert result.outcome == "naked"
+    assert result.naked is True
+    assert result.completed is False
+    assert result.pnl < Decimal("0")
+    assert store.hedge_incidents_since(0) == 1
+
+
+@pytest.mark.asyncio
+async def test_honest_maker_rests_then_fills_after_timeout(tmp_path: Path) -> None:
+    yes, no, _payload = _load_pair("gap_3c.json")
+    books = BookStore()
+    books.apply_snapshot(
+        {
+            "token_id": yes.token_id,
+            "bids": [{"price": str(lvl.price), "size": str(lvl.size)} for lvl in yes.bids],
+            "asks": [{"price": str(lvl.price), "size": str(lvl.size)} for lvl in yes.asks],
+            "tick": str(yes.tick),
+            "min_order_size": str(yes.min_order_size),
+            "ts_ms": yes.ts_ms,
+        }
+    )
+    books.apply_snapshot(
+        {
+            "token_id": no.token_id,
+            "bids": [{"price": str(lvl.price), "size": str(lvl.size)} for lvl in no.bids],
+            "asks": [{"price": str(lvl.price), "size": str(lvl.size)} for lvl in no.asks],
+            "tick": str(no.tick),
+            "min_order_size": str(no.min_order_size),
+            "ts_ms": no.ts_ms,
+        }
+    )
+    store = StateStore(tmp_path / "state.sqlite")
+    ledger = PaperLedger(
+        store,
+        bankroll=d("500"),
+        daily_pnl=d("0"),
+        honest=True,
+        maker_rest_ms=400,
+    )
+    first = await ledger.try_fill(
+        _maker_intent(d("10")), FEE_FREE, now_ms=1_000, yes=yes, no=no
+    )
+    assert first.outcome == "resting"
+    assert first.pnl == Decimal("0")
+    assert ledger.bankroll == Decimal("500")
+    later = await ledger.poll_rests(books, now_ms=1_400)
+    assert len(later) == 1
+    assert later[0].outcome == "filled"
+    assert later[0].completed is True
+    assert later[0].pnl == Decimal("0.30")
+
+
 def test_ledger_never_uses_float_or_secure_client() -> None:
     import arb.paper_ledger as mod
 

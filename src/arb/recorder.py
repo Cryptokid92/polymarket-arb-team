@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from arb.books import Book, BookStore
+from arb.books import Book, BookStore, Level
 
 
 def event_ts_ms(event: dict[str, Any]) -> int:
@@ -63,8 +63,8 @@ class BookFrame:
     no: Book
 
 
-def frames_from_events(events: Iterable[dict[str, Any]]) -> list[BookFrame]:
-    """Replay recorded books in time order. Each frame is a post-event YES/NO pair."""
+def _frames_one_market(events: Iterable[dict[str, Any]]) -> list[BookFrame]:
+    """Pair YES/NO for one condition only. Never mix markets."""
     ordered = sorted(events, key=event_ts_ms)
     store = BookStore()
     yes: Book | None = None
@@ -90,6 +90,44 @@ def frames_from_events(events: Iterable[dict[str, Any]]) -> list[BookFrame]:
                 )
             )
     return frames
+
+
+def frames_from_events(events: Iterable[dict[str, Any]]) -> list[BookFrame]:
+    """Replay recorded books in time order. Each frame is a same-market YES/NO pair.
+
+    Multi-market tapes are grouped by condition_id so YES from A is never
+    hunted against NO from B.
+    """
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for event in events:
+        cid = str(event.get("condition_id") or "")
+        grouped.setdefault(cid, []).append(event)
+    frames: list[BookFrame] = []
+    for group in grouped.values():
+        frames.extend(_frames_one_market(group))
+    frames.sort(key=lambda frame: frame.ts_ms)
+    return frames
+
+
+def _levels_to_rows(levels: list[Level]) -> list[dict[str, str]]:
+    return [{"price": str(level.price), "size": str(level.size)} for level in levels]
+
+
+def book_to_event(book: Book, market_side: str, condition_id: str) -> dict[str, Any]:
+    """Public-book JSONL row compatible with frames_from_events. No orders."""
+    return {
+        "event_type": "book",
+        "ts_ms": book.ts_ms,
+        "timestamp": str(book.ts_ms),
+        "condition_id": condition_id,
+        "token_id": book.token_id,
+        "asset_id": book.token_id,
+        "market_side": str(market_side).upper(),
+        "tick_size": str(book.tick),
+        "min_order_size": str(book.min_order_size),
+        "bids": _levels_to_rows(book.bids),
+        "asks": _levels_to_rows(book.asks),
+    }
 
 
 class BookRecorder:

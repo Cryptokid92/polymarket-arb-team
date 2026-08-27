@@ -59,6 +59,17 @@ uv run python scripts/report_paper.py
 
 `--place-orders` is rejected. If the public API is unreachable the runner exits with a clear error and does **not** fake gaps.
 
+`--record-books` writes watch-slice public books to `data/paper/books.jsonl` (gitignored) for `scripts/backtest_tape.py`. The dashboard shows closest walked edge / near-misses and paper alerts. Those are not live orders.
+
+Standalone recorder (public client only):
+
+```bash
+uv run python scripts/record_books.py --all-markets --once --out data/paper/books.jsonl
+uv run python scripts/backtest_tape.py --tape data/paper/books.jsonl
+```
+
+If the tape backtest verdict is `non_positive`, stop. Do not loosen risk. Do not go live.
+
 Writes gitignored JSONL (covered by `data/`):
 
 - `data/paper/gaps.jsonl` — hunter hits (edge, VWAPs, estimated maker/taker EV)
@@ -85,6 +96,8 @@ These match the installed client in this repo. If they drift, follow the install
 - `src/arb/config.py` — paper-default settings and the live gate
 - `src/arb/app.py` — hunt → risk → fee pipeline and paper run loop
 - `scripts/paper_run.py` — networked paper runner (public client only)
+- `scripts/record_books.py` — record public YES/NO books for replay
+- `scripts/backtest_tape.py` — replay a recorded tape (stop if EV is not positive)
 - `scripts/report_paper.py` — summarize a paper run
 - `scripts/paper_ui.py` — read-only local dashboard (stdlib `http.server`)
 - `AGENTS.md` — shared law for Grok / Cursor

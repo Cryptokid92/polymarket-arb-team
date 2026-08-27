@@ -41,6 +41,8 @@ LOG_NAMES = (
     "intents.jsonl",
     "rejects.jsonl",
     "fills.jsonl",
+    "nearmiss.jsonl",
+    "alerts.jsonl",
     "stats.json",
 )
 
@@ -271,6 +273,46 @@ def _recent_fills(rows: list[dict[str, Any]], limit: int) -> list[dict[str, Any]
     return out
 
 
+def _recent_nearmiss(rows: list[dict[str, Any]], limit: int) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    for row in rows[-limit:]:
+        out.append(
+            {
+                "ts_ms": row.get("ts_ms"),
+                "condition_id": row.get("condition_id"),
+                "raw_edge": row.get("raw_edge"),
+                "yes_vwap": row.get("yes_vwap"),
+                "no_vwap": row.get("no_vwap"),
+                "fillable": row.get("fillable_shares", row.get("fillable")),
+                "age": row.get("book_age_ms", row.get("age")),
+                "in_watch": row.get("in_watch"),
+                "thin": row.get("thin"),
+            }
+        )
+    out.reverse()
+    return out
+
+
+def _recent_alerts(rows: list[dict[str, Any]], limit: int) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    for row in rows[-limit:]:
+        out.append(
+            {
+                "ts_ms": row.get("ts_ms"),
+                "condition_id": row.get("condition_id"),
+                "path": row.get("path"),
+                "size": row.get("size"),
+                "raw_edge": row.get("raw_edge"),
+                "expected_net_edge": row.get("expected_net_edge"),
+                "yes_vwap": row.get("yes_vwap"),
+                "no_vwap": row.get("no_vwap"),
+                "outcome": row.get("outcome"),
+            }
+        )
+    out.reverse()
+    return out
+
+
 def _recent_intents(rows: list[dict[str, Any]], limit: int) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
     for row in rows[-limit:]:
@@ -301,6 +343,8 @@ def summarize_dashboard(
     intents = read_jsonl(data_dir / "intents.jsonl")
     rejects = read_jsonl(data_dir / "rejects.jsonl")
     fills = read_jsonl(data_dir / "fills.jsonl")
+    nearmiss = read_jsonl(data_dir / "nearmiss.jsonl")
+    alerts = read_jsonl(data_dir / "alerts.jsonl")
     stats = read_stats_file(data_dir / "stats.json")
     control = read_control(data_dir)
 
@@ -314,6 +358,11 @@ def summarize_dashboard(
     universe = 0
     bankroll = "500"
     daily_pnl = "0"
+    completed_pairs = 0
+    naked_incidents = 0
+    best_edge = None
+    closest: dict[str, Any] | None = None
+    edge_histogram: dict[str, Any] = {}
     if stats is not None:
         markets_listed = _int_or_zero(stats.get("markets_listed"))
         universe = _int_or_zero(stats.get("universe"))
@@ -329,6 +378,22 @@ def summarize_dashboard(
             bankroll = str(stats.get("bankroll"))
         if stats.get("daily_pnl") is not None:
             daily_pnl = str(stats.get("daily_pnl"))
+        completed_pairs = _int_or_zero(stats.get("completed_pairs"))
+        naked_incidents = _int_or_zero(stats.get("naked_incidents"))
+        if stats.get("best_edge") is not None:
+            best_edge = str(stats.get("best_edge"))
+        hist = stats.get("edge_histogram")
+        if isinstance(hist, dict):
+            edge_histogram = {str(key): _int_or_zero(value) for key, value in hist.items()}
+        if stats.get("closest_condition_id"):
+            closest = {
+                "condition_id": stats.get("closest_condition_id"),
+                "raw_edge": stats.get("best_edge"),
+                "fillable": stats.get("closest_fillable"),
+                "book_age_ms": stats.get("closest_book_age_ms"),
+                "in_watch": stats.get("closest_in_watch"),
+                "thin": stats.get("closest_thin"),
+            }
 
     sqlite_path = data_dir / "state.sqlite"
     sqlite_bankroll = _sqlite_meta(sqlite_path, "bankroll")
@@ -341,7 +406,7 @@ def summarize_dashboard(
             daily_pnl = sqlite_pnl
 
     last_ts: int | None = None
-    for rows in (gaps, intents, rejects, fills):
+    for rows in (gaps, intents, rejects, fills, nearmiss, alerts):
         for row in rows:
             ts = _row_ts_ms(row)
             if ts is not None and (last_ts is None or ts > last_ts):
@@ -386,7 +451,16 @@ def summarize_dashboard(
         "paper": {
             "bankroll": bankroll,
             "daily_pnl": daily_pnl,
+            "completed_pairs": completed_pairs,
+            "naked_incidents": naked_incidents,
+            "best_edge": best_edge,
+            "closest": closest,
+            "edge_histogram": edge_histogram,
         },
+        "closest": closest,
+        "best_edge": best_edge,
+        "recent_nearmiss": _recent_nearmiss(nearmiss, recent_limit),
+        "recent_alerts": _recent_alerts(alerts, recent_limit),
         "control": {
             "paused": control.paused,
             "rotate_s": rotate_s,
@@ -446,6 +520,11 @@ def render_html(summary: dict[str, Any]) -> str:
     reasons = summary["reject_reasons"]
     bankroll = paper.get("bankroll", "500")
     daily_pnl = str(paper.get("daily_pnl", "0"))
+    completed_pairs = paper.get("completed_pairs", 0)
+    naked_incidents = paper.get("naked_incidents", 0)
+    closest = summary.get("closest") or paper.get("closest")
+    best_edge = summary.get("best_edge") or paper.get("best_edge")
+    histogram = paper.get("edge_histogram") or {}
     pnl_lost = daily_pnl.startswith("-")
     pnl_label = "lost" if pnl_lost else "earned"
     pnl_class = "lost" if pnl_lost else "earned"
@@ -460,6 +539,24 @@ def render_html(summary: dict[str, Any]) -> str:
         if reasons
         else '<tr><td colspan="2" class="empty">None</td></tr>'
     )
+    hist_rows = (
+        "".join(
+            f"<tr><td>{_esc(bucket)}</td><td>{_esc(count)}</td></tr>"
+            for bucket, count in histogram.items()
+        )
+        if histogram
+        else '<tr><td colspan="2" class="empty">None</td></tr>'
+    )
+    if closest:
+        closest_html = (
+            f'<p>best edge <strong>{_esc(best_edge)}</strong>'
+            f' · pair {_esc(closest.get("condition_id"))}'
+            f' · fillable {_esc(closest.get("fillable"))}'
+            f' · age {_esc(closest.get("book_age_ms"))} ms'
+            f' · in watch {_esc(closest.get("in_watch"))}</p>'
+        )
+    else:
+        closest_html = '<p class="empty">No walked books yet. Near-misses are not gaps.</p>'
     halt_class = "halted" if halt.get("halted") else "ok"
     halt_label = "HALTED" if halt.get("halted") else "not halted"
     sources = ", ".join(halt.get("sources") or ()) or "none"
@@ -516,6 +613,8 @@ def render_html(summary: dict[str, Any]) -> str:
       <div class="card">paper bankroll<div class="n">{_esc(bankroll)}</div></div>
       <div class="card">realized PnL ({pnl_label})<div class="n {pnl_class}">{_esc(daily_pnl)}</div></div>
       <div class="card">fills<div class="n">{_esc(counts.get("fills", 0))}</div></div>
+      <div class="card">completed pairs<div class="n">{_esc(completed_pairs)}</div></div>
+      <div class="card">naked incidents<div class="n">{_esc(naked_incidents)}</div></div>
       <div class="card">paused<div class="n">{_esc("yes" if paused else "no")}</div></div>
       <div class="card">runner<div class="n">{_esc(runner_alive)}</div></div>
     </div>
@@ -541,6 +640,29 @@ def render_html(summary: dict[str, Any]) -> str:
       <div class="card">intents<div class="n">{_esc(counts["intents"])}</div></div>
       <div class="card">rejects<div class="n">{_esc(counts["rejects"])}</div></div>
     </div>
+    <h2>Closest book this hour</h2>
+    {closest_html}
+    <h2>Edge histogram (walked asks; thin is none)</h2>
+    <table><thead><tr><th>bucket</th><th>count</th></tr></thead>
+    <tbody>{hist_rows}</tbody></table>
+    <h2>Recent near-misses</h2>
+    {_rows_html(summary.get("recent_nearmiss") or [], [
+        ("raw_edge", "raw_edge"),
+        ("fillable", "fillable"),
+        ("in_watch", "in_watch"),
+        ("thin", "thin"),
+        ("age", "age"),
+        ("condition_id", "condition_id"),
+    ])}
+    <h2>Paper alerts (not live orders)</h2>
+    {_rows_html(summary.get("recent_alerts") or [], [
+        ("path", "path"),
+        ("size", "size"),
+        ("raw_edge", "raw_edge"),
+        ("expected_net_edge", "expected_net_edge"),
+        ("outcome", "outcome"),
+        ("condition_id", "condition_id"),
+    ])}
     <h2>Reject reasons</h2>
     <table><thead><tr><th>reason</th><th>count</th></tr></thead>
     <tbody>{reason_rows}</tbody></table>

@@ -66,3 +66,10 @@ Paper $500 bankroll + dashboard controls (not Task 12): paper-fill both legs at 
 
 - `uv run pytest -q` — 185 passed
 - Plan: `docs/plans/cursor-paper-bankroll-pnl.md`
+
+Paper trading helper (not Task 12): closest-book / near-miss JSONL + stats, `record_books.py` streams official public books, honest paper fills (FAK miss / maker rest / naked hedge), pin 8 hot pairs inside `WATCH_PAIRS=40`, local `alerts.jsonl`, `scripts/backtest_tape.py`. Caps unchanged (`min_edge` 0.01, `stale_ms` 400, `LIST_SAFETY_CAP` 5000). Task 12 stays dark.
+
+- `uv run pytest -q` — 216 passed
+- Plan: `docs/plans/cursor-paper-trading-helper.md`
+- Evidence: `docs/debug-reports/2026-08-27-paper-evidence.md` — 1-hour `--all-markets` finished (`listed=5000` / `universe=1546` / `gaps=0` / best walked edge `-0.001`). Same-market tape: 0 trades, verdict `non_positive`. Stop. Do not loosen `min_edge`. Task 12 stays dark.
+- `ALLOW_LIVE` was not created. Live trading is not enabled. No secrets committed.

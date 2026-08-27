@@ -50,10 +50,23 @@ def _halt_reason(data_dir: Path) -> str | None:
     return str(row[0])
 
 
+def _stats_file(data_dir: Path) -> dict:
+    path = data_dir / "stats.json"
+    if not path.is_file():
+        return {}
+    try:
+        parsed = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
 def summarize_paper(data_dir: Path) -> dict:
     gaps = _read_jsonl(data_dir / "gaps.jsonl")
     intents = _read_jsonl(data_dir / "intents.jsonl")
     rejects = _read_jsonl(data_dir / "rejects.jsonl")
+    fills = _read_jsonl(data_dir / "fills.jsonl")
+    snapshot = _stats_file(data_dir)
 
     maker_ev = Decimal("0")
     taker_ev = Decimal("0")
@@ -69,6 +82,18 @@ def summarize_paper(data_dir: Path) -> dict:
         if reason:
             reasons[str(reason)] += 0  # already counted in rejects.jsonl when present
 
+    completed = 0
+    naked = 0
+    for fill in fills:
+        if fill.get("completed") is True:
+            completed += 1
+        if fill.get("naked") is True:
+            naked += 1
+    if snapshot.get("completed_pairs") is not None:
+        completed = int(snapshot["completed_pairs"])
+    if snapshot.get("naked_incidents") is not None:
+        naked = int(snapshot["naked_incidents"])
+
     return {
         "gaps_seen": len(gaps),
         "intents_approved": len(intents),
@@ -76,6 +101,14 @@ def summarize_paper(data_dir: Path) -> dict:
         "estimated_taker_ev": taker_ev,
         "reject_reasons": dict(reasons),
         "halt_reason": _halt_reason(data_dir),
+        "best_edge": snapshot.get("best_edge"),
+        "closest_condition_id": snapshot.get("closest_condition_id"),
+        "closest_fillable": snapshot.get("closest_fillable"),
+        "closest_in_watch": snapshot.get("closest_in_watch"),
+        "nearmiss_considers": snapshot.get("nearmiss_considers", 0),
+        "edge_histogram": snapshot.get("edge_histogram") or {},
+        "completed_pairs": completed,
+        "naked_incidents": naked,
     }
 
 
@@ -84,8 +117,15 @@ def format_report(stats: dict) -> str:
         "paper report",
         f"  gaps seen: {stats['gaps_seen']}",
         f"  intents approved: {stats['intents_approved']}",
+        f"  completed pairs: {stats.get('completed_pairs', 0)}",
+        f"  naked incidents: {stats.get('naked_incidents', 0)}",
         f"  estimated maker EV: {stats['estimated_maker_ev']}",
         f"  estimated taker EV: {stats['estimated_taker_ev']}",
+        f"  best edge this hour: {stats.get('best_edge')}",
+        f"  closest pair: {stats.get('closest_condition_id')}",
+        f"  closest fillable: {stats.get('closest_fillable')}",
+        f"  closest in watch: {stats.get('closest_in_watch')}",
+        f"  near-miss considers: {stats.get('nearmiss_considers', 0)}",
         "  reject reasons:",
     ]
     halt_reason = stats.get("halt_reason")
@@ -97,6 +137,13 @@ def format_report(stats: dict) -> str:
     else:
         for reason, count in sorted(reasons.items()):
             lines.append(f"    {reason}: {count}")
+    histogram = stats.get("edge_histogram") or {}
+    lines.append("  edge histogram:")
+    if not histogram:
+        lines.append("    (none)")
+    else:
+        for bucket, count in sorted(histogram.items()):
+            lines.append(f"    {bucket}: {count}")
     return "\n".join(lines)
 
 

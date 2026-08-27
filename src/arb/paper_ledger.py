@@ -6,8 +6,10 @@ import uuid
 from dataclasses import dataclass
 from decimal import Decimal
 
+from arb.backtest import _MissRng, _maker_side_fills, walk_bids
+from arb.books import Book, BookStore
 from arb.fee_agent import MarketFees
-from arb.fees import maker_fee, net_edge_maker, net_edge_taker, pair_taker_fees
+from arb.fees import maker_fee, net_edge_maker, net_edge_taker, pair_taker_fees, taker_fee
 from arb.merge import maybe_merge
 from arb.messages import Intent
 from arb.money import d
@@ -72,6 +74,19 @@ class PaperFillResult:
     daily_pnl: Decimal
     path: str
     condition_id: str
+    outcome: str = "filled"
+    naked: bool = False
+    hedge_pnl: Decimal = Decimal("0")
+    completed: bool = True
+
+
+@dataclass
+class RestingPair:
+    intent: Intent
+    fees: MarketFees
+    posted_yes: Book
+    posted_no: Book
+    posted_ms: int
 
 
 class PaperLedger:
@@ -83,39 +98,59 @@ class PaperLedger:
         *,
         bankroll: Decimal,
         daily_pnl: Decimal,
+        honest: bool = False,
+        p_miss: Decimal = Decimal("0.3"),
+        rng_seed: int = 0,
+        hedge_slippage: Decimal = Decimal("0.01"),
+        maker_rest_ms: int = 400,
     ) -> None:
         self.store = store
         self.bankroll = _require_decimal(d(bankroll), "bankroll")
         self.daily_pnl = _require_decimal(d(daily_pnl), "daily_pnl")
+        self.honest = honest
+        self.p_miss = _require_decimal(d(p_miss), "p_miss")
+        self.hedge_slippage = _require_decimal(d(hedge_slippage), "hedge_slippage")
+        self.maker_rest_ms = int(maker_rest_ms)
+        self._rng = _MissRng(int(rng_seed))
+        self._rests: list[RestingPair] = []
 
-    async def try_fill(
+    def _rejected(
+        self,
+        intent: Intent,
+        fees: MarketFees,
+        reason: str,
+    ) -> PaperFillResult:
+        pair_fees = pair_fees_for_intent(intent, fees)
+        cost = pair_cost(intent, fees)
+        return PaperFillResult(
+            accepted=False,
+            reject_reason=reason,
+            size=intent.size,
+            yes_vwap=intent.gap.yes_vwap,
+            no_vwap=intent.gap.no_vwap,
+            pair_fees=pair_fees,
+            cost=cost,
+            pnl=_ZERO,
+            bankroll=self.bankroll,
+            daily_pnl=self.daily_pnl,
+            path=intent.path,
+            condition_id=intent.gap.condition_id,
+            outcome="rejected",
+            naked=False,
+            hedge_pnl=_ZERO,
+            completed=False,
+        )
+
+    async def _complete_pair(
         self,
         intent: Intent,
         fees: MarketFees,
         now_ms: int,
         *,
-        mode: str = "paper",
+        mode: str,
     ) -> PaperFillResult:
-        if mode == "live":
-            raise RuntimeError("paper ledger will not fill live")
-        cost = pair_cost(intent, fees)
         pair_fees = pair_fees_for_intent(intent, fees)
-        if cost > self.bankroll:
-            return PaperFillResult(
-                accepted=False,
-                reject_reason="insufficient_bankroll",
-                size=intent.size,
-                yes_vwap=intent.gap.yes_vwap,
-                no_vwap=intent.gap.no_vwap,
-                pair_fees=pair_fees,
-                cost=cost,
-                pnl=_ZERO,
-                bankroll=self.bankroll,
-                daily_pnl=self.daily_pnl,
-                path=intent.path,
-                condition_id=intent.gap.condition_id,
-            )
-
+        cost = pair_cost(intent, fees)
         yes_cid = f"paper-yes-{uuid.uuid4()}"
         no_cid = f"paper-no-{uuid.uuid4()}"
         condition_id = intent.gap.condition_id
@@ -150,4 +185,216 @@ class PaperLedger:
             daily_pnl=self.daily_pnl,
             path=intent.path,
             condition_id=condition_id,
+            outcome="filled",
+            naked=False,
+            hedge_pnl=_ZERO,
+            completed=True,
         )
+
+    def _hedge_sell_px(
+        self, book: Book | None, size: Decimal, fallback: Decimal
+    ) -> Decimal:
+        if book is not None:
+            walked = walk_bids(book.bids, size)
+            if walked is not None:
+                bid_vwap = walked[0]
+            elif book.bids:
+                bid_vwap = book.bids[0].price
+            else:
+                bid_vwap = _ZERO
+        else:
+            bid_vwap = fallback
+        px = bid_vwap - self.hedge_slippage
+        if px < _ZERO:
+            return _ZERO
+        return px
+
+    def _naked_leg(
+        self,
+        intent: Intent,
+        fees: MarketFees,
+        now_ms: int,
+        *,
+        filled_side: str,
+        book: Book | None,
+    ) -> PaperFillResult:
+        size = intent.size
+        if filled_side == "YES":
+            buy_px = intent.gap.yes_vwap
+            fee = (
+                taker_fee(size, buy_px, fees.yes_rate)
+                if intent.path == "taker_fak"
+                else _ZERO
+            )
+        else:
+            buy_px = intent.gap.no_vwap
+            fee = (
+                taker_fee(size, buy_px, fees.no_rate)
+                if intent.path == "taker_fak"
+                else _ZERO
+            )
+        sell_px = self._hedge_sell_px(book, size, buy_px)
+        cost = size * buy_px + fee
+        proceeds = size * sell_px
+        pnl = proceeds - cost
+        condition_id = intent.gap.condition_id
+        self.store.record_fill(
+            f"paper-{filled_side.lower()}-{uuid.uuid4()}",
+            condition_id,
+            size,
+            buy_px,
+            now_ms,
+        )
+        self.store.record_fill(
+            f"paper-hedge-{uuid.uuid4()}",
+            condition_id,
+            size,
+            sell_px,
+            now_ms,
+        )
+        self.store.record_hedge_incident(now_ms)
+        self.store.set_inventory(condition_id, _ZERO, _ZERO)
+        self.bankroll = self.bankroll + pnl
+        self.daily_pnl = self.daily_pnl + pnl
+        self.store.set_bankroll(self.bankroll)
+        self.store.set_daily_pnl(self.daily_pnl)
+        return PaperFillResult(
+            accepted=True,
+            reject_reason=None,
+            size=size,
+            yes_vwap=intent.gap.yes_vwap,
+            no_vwap=intent.gap.no_vwap,
+            pair_fees=fee,
+            cost=cost,
+            pnl=pnl,
+            bankroll=self.bankroll,
+            daily_pnl=self.daily_pnl,
+            path=intent.path,
+            condition_id=condition_id,
+            outcome="naked",
+            naked=True,
+            hedge_pnl=pnl,
+            completed=False,
+        )
+
+    async def try_fill(
+        self,
+        intent: Intent,
+        fees: MarketFees,
+        now_ms: int,
+        *,
+        mode: str = "paper",
+        yes: Book | None = None,
+        no: Book | None = None,
+    ) -> PaperFillResult:
+        if mode == "live":
+            raise RuntimeError("paper ledger will not fill live")
+        cost = pair_cost(intent, fees)
+        if cost > self.bankroll:
+            return self._rejected(intent, fees, "insufficient_bankroll")
+
+        if not self.honest:
+            return await self._complete_pair(intent, fees, now_ms, mode=mode)
+
+        if intent.path == "maker_gtc":
+            if yes is None or no is None:
+                return await self._complete_pair(intent, fees, now_ms, mode=mode)
+            self._rests.append(
+                RestingPair(
+                    intent=intent,
+                    fees=fees,
+                    posted_yes=yes,
+                    posted_no=no,
+                    posted_ms=now_ms,
+                )
+            )
+            pair_fees = pair_fees_for_intent(intent, fees)
+            return PaperFillResult(
+                accepted=True,
+                reject_reason=None,
+                size=intent.size,
+                yes_vwap=intent.gap.yes_vwap,
+                no_vwap=intent.gap.no_vwap,
+                pair_fees=pair_fees,
+                cost=cost,
+                pnl=_ZERO,
+                bankroll=self.bankroll,
+                daily_pnl=self.daily_pnl,
+                path=intent.path,
+                condition_id=intent.gap.condition_id,
+                outcome="resting",
+                naked=False,
+                hedge_pnl=_ZERO,
+                completed=False,
+            )
+
+        miss_second = self._rng.second_fak_misses(self.p_miss)
+        if not miss_second:
+            return await self._complete_pair(intent, fees, now_ms, mode=mode)
+        return self._naked_leg(
+            intent, fees, now_ms, filled_side="YES", book=yes
+        )
+
+    async def poll_rests(self, store: BookStore, now_ms: int) -> list[PaperFillResult]:
+        """Settle or expire maker rests. No live cancel."""
+        results: list[PaperFillResult] = []
+        still: list[RestingPair] = []
+        for rest in self._rests:
+            yes = store.get(rest.intent.gap.yes_token_id)
+            no = store.get(rest.intent.gap.no_token_id)
+            if yes is None or no is None:
+                still.append(rest)
+                continue
+            timed_out = now_ms - rest.posted_ms >= self.maker_rest_ms
+            yes_ok = _maker_side_fills(
+                rest.posted_yes, yes, rest.intent.yes_limit, timed_out
+            )
+            no_ok = _maker_side_fills(
+                rest.posted_no, no, rest.intent.no_limit, timed_out
+            )
+            if yes_ok and no_ok:
+                results.append(
+                    await self._complete_pair(
+                        rest.intent, rest.fees, now_ms, mode="paper"
+                    )
+                )
+                continue
+            if not timed_out:
+                still.append(rest)
+                continue
+            if yes_ok or no_ok:
+                filled_side = "YES" if yes_ok else "NO"
+                book = yes if filled_side == "YES" else no
+                results.append(
+                    self._naked_leg(
+                        rest.intent,
+                        rest.fees,
+                        now_ms,
+                        filled_side=filled_side,
+                        book=book,
+                    )
+                )
+                continue
+            pair_fees = pair_fees_for_intent(rest.intent, rest.fees)
+            results.append(
+                PaperFillResult(
+                    accepted=True,
+                    reject_reason=None,
+                    size=rest.intent.size,
+                    yes_vwap=rest.intent.gap.yes_vwap,
+                    no_vwap=rest.intent.gap.no_vwap,
+                    pair_fees=pair_fees,
+                    cost=pair_cost(rest.intent, rest.fees),
+                    pnl=_ZERO,
+                    bankroll=self.bankroll,
+                    daily_pnl=self.daily_pnl,
+                    path=rest.intent.path,
+                    condition_id=rest.intent.gap.condition_id,
+                    outcome="canceled",
+                    naked=False,
+                    hedge_pnl=_ZERO,
+                    completed=False,
+                )
+            )
+        self._rests = still
+        return results
