@@ -10,38 +10,61 @@ Command:
 ARB_MODE=paper uv run python scripts/paper_run.py --all-markets --seconds 3600 --record-books --data-dir data/paper-evidence
 ```
 
-## Opening scan (first seconds)
+`data/paper-evidence/` is gitignored. Not committed.
 
-From `data/paper-evidence/stats.json` (gitignored, not committed):
+## Opening scan
 
 - `markets_listed`: 5000 (safety ceiling)
 - `universe`: 1546
 - `gaps`: 0
-- `intents`: 0
-- `alerts`: 0
-- `fills` / `completed_pairs` / `naked_incidents`: 0
+- `intents` / `alerts` / `fills`: 0
 - `watching`: 40
-- rejects: `neg_risk` 3329, `not_accepting` 56, `seconds_delay` 68, `short_crypto_window` 1 (3454 total)
-- `best_edge`: about `-0.05` (five cents short of completeness on walked VWAPs)
-- `closest_in_watch`: false (the closest pair was not in the first 40)
-- `nearmiss_considers`: 900+ during the first book batches; histogram `lt_-0.05`
-- `books.jsonl` written (`--record-books`)
+- rejects: `neg_risk` 3329, `not_accepting` 56, `seconds_delay` 68, `short_crypto_window` 1
+- First closest walked edge: about `-0.05`
 
-Hunt did not fire. Near-miss telemetry is why the run is not "dead": books are walked, and the closest pair is still ~5¢ away from `min_edge` 0.01.
+Process stayed up after listing and batched books. No fat-payload death. No WS Decimal crash in the opening window.
+
+## Mid-hour (process still running)
+
+Around minute 46–47:
+
+- `gaps`: 0
+- `best_edge`: `-0.001` (one tenth of a cent short of completeness; still below `min_edge` 0.01)
+- `closest_fillable`: 5
+- `closest_in_watch`: false
+- `nearmiss_considers`: ~787k
+- histogram: most walks `lt_-0.05`; a few thousand in `-0.01_0`; no `0_0.005` or better
+- `books.jsonl`: ~43k events
+- `nearmiss.jsonl`: 11 rows (new-best only; no non-negative walked edge)
+
+Hunt did not fire. Near-miss is why the hour is not "dead": books are walked, and the closest pair never reached a 1¢ completeness gap.
 
 Caps were not loosened.
 
-## Hour result
+## Honest tape backtest
 
-Filled in after the 3600s window ends. See the same `stats.json` / `report_paper.py` / `backtest_tape.py` output.
+First replay mixed YES from market A with NO from market B (`frames_from_events` was global). That invented 106 fake trades and −109 paper PnL. That was a lie.
 
-## Tape backtest
+Fix: group frames by `condition_id`. Same-market replay of this tape:
+
+```text
+events: 43874
+trades: 0
+completed pairs: 0
+naked incidents: 0
+net pnl: 0
+verdict: non_positive
+```
+
+**Stop.** Do not loosen `min_edge`. Do not treat a silent completeness hour as a reason to build or enable Task 12.
 
 ```bash
 uv run python scripts/backtest_tape.py --tape data/paper-evidence/books.jsonl
 ```
 
-If verdict is `non_positive` or `no_tape`: **stop**. Do not loosen `min_edge`. Do not implement Task 12 on the back of a silent hour.
+## Hour result
+
+Filled when the 3600s window exits (halt reason, final histogram, whether the process stayed up).
 
 ## Task 12
 
