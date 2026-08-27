@@ -40,12 +40,13 @@ One Python process. Specialists are functions, not separate services. There is a
 
 1. **List markets.** `AsyncPublicClient.list_markets(closed=False, page_size=100)`. Walk official pages until the catalog ends, `--max-markets`, or the documented safety ceiling (`5000`). Default `--max-markets` is 20 (tests). `--all-markets` or `--max-markets 0` means no user cap. `markets_listed` is every market seen; `universe` is what `reject_universe` kept. If the public API is unreachable, the runner exits with a clear error and does not fake gaps.
 2. **v1 universe filter.** Drop closed/archived, not accepting, neg-risk, delayed (`seconds_delay > 0`), missing YES/NO token ids, and 5/15-minute crypto windows (slug/question/tags matching crypto plus a 5 or 15 minute window).
-3. **Books.** REST snapshot of kept YES/NO token ids in batches (`get_order_books`, default `--book-batch-size 50`). Apply each batch. A failed batch is logged (`book_batch_failed`) and skipped; `PublicApiError` only if every batch fails. Then websocket `subscribe(MarketSpec(token_ids=...))` on a first watch slice only (default `--watch-pairs 40` = 80 tokens). Remaining universe pairs rotate in every `--watch-rotate-s` seconds (default 90). If `subscribe` is missing, poll REST in the same batches. `BookStore` applies snapshots and `price_change` deltas. Do not subscribe all ~1540 pairs at once. Do not raise the listing safety ceiling as a books-payload fix.
-4. **Hunt.** `hunt()` walks both ask books. No gap → nothing else runs.
-5. **Risk.** `approve()` may clip size to `max_notional_per_trade` and re-walk both sides. Refusal reasons below.
-6. **Fees / intent.** `choose_intent()` prefers maker GTC. Taker FAK only if EV is still positive after protocol fees plus a `0.005`/share buffer.
-7. **Paper executor.** `PaperBroker` writes a YES buy and a NO buy to JSONL with status `paper_posted`. No network. No CLOB order.
-8. **Paper fill + settlement.** Both legs fill at the gap VWAPs against a **$500 paper bankroll** (not real money). Taker FAK subtracts protocol pair fees; makers pay 0. A completed pair is worth $1/share. PnL updates `daily_pnl` and remaining bankroll. Cost above remaining bankroll is `insufficient_bankroll`. Paper merge (`maybe_merge`) is wired here. Live merge is Task 12.
+3. **Books.** REST snapshot of kept YES/NO token ids in batches (`get_order_books`, default `--book-batch-size 50`). Apply each batch. A failed batch is logged (`book_batch_failed`) and skipped; `PublicApiError` only if every batch fails. Then websocket `subscribe(MarketSpec(token_ids=...))` on a first watch slice only (default `--watch-pairs 40` = 80 tokens). The slice **pins** up to 8 highest walked-edge pairs (`PIN_HOT_PAIRS`) and rotates the rest every `--watch-rotate-s` seconds (default 90). If `subscribe` is missing, poll REST in the same batches. `BookStore` applies snapshots and `price_change` deltas. Do not subscribe all ~1540 pairs at once. Do not raise the listing safety ceiling as a books-payload fix.
+4. **Near-miss.** Every consider walks ask depth even when hunt is silent. Best walked `raw_edge`, fillable size, book age, and in-watch flag go to `stats.json` / `nearmiss.jsonl`. Thin books do not invent an edge from top-of-book. This is telemetry, not a trade.
+5. **Hunt.** `hunt()` walks both ask books. No gap → nothing else runs. `min_edge` stays `0.01`.
+6. **Risk.** `approve()` may clip size to `max_notional_per_trade` and re-walk both sides. Refusal reasons below.
+7. **Fees / intent.** `choose_intent()` prefers maker GTC. Taker FAK only if EV is still positive after protocol fees plus a `0.005`/share buffer. A chosen intent also writes a local `alerts.jsonl` row (dashboard only; not an order).
+8. **Paper executor.** `PaperBroker` writes a YES buy and a NO buy to JSONL with status `paper_posted`. No network. No CLOB order.
+9. **Honest paper fill.** The networked runner does **not** assume both legs fill. Taker FAK may miss the second leg (`p_miss` default 0.3) and flatten leftover with a paper FAK sell (`incident=True`). Maker GTC rests until timeout, then fill, cancel, or hedge. Completeness settlement ($1/share) only when both legs fill. Cost above remaining bankroll is `insufficient_bankroll`. Live merge is Task 12.
 
 `scripts/paper_run.py` is that loop. `--place-orders` is rejected. `--paper-bankroll` / `PAPER_BANKROLL` defaults to 500.
 
@@ -143,8 +144,11 @@ Logs are gitignored under `data/` (default `data/paper/`):
 - `gaps.jsonl` — hunter hits (edge, VWAPs, estimated maker/taker EV, optional reject reason)
 - `intents.jsonl` — paper-only approved intents (`PaperBroker`)
 - `rejects.jsonl` — universe / risk / fee reasons
-- `stats.json` — listed / universe / gap / intent / reject / fill counts, `bankroll`, `daily_pnl`, `heartbeat_ms`
-- `fills.jsonl` — paper fills and completeness PnL
+- `nearmiss.jsonl` — closest walked books (new best or non-negative walked edge)
+- `alerts.jsonl` — local paper alerts when an intent is chosen
+- `books.jsonl` — optional recorded public books (`--record-books`)
+- `stats.json` — listed / universe / gap / intent / reject / fill counts, `bankroll`, `daily_pnl`, closest edge, histogram, `heartbeat_ms`
+- `fills.jsonl` — paper fills, completed pairs, naked incidents
 - `control.json` — local pause + watch-rotate interval (10–120s)
 - `state.sqlite` — halt flag, halt reason, paper fills, bankroll, daily_pnl (path injectable)
 
@@ -199,6 +203,9 @@ Public API connected. `--max-markets 80` was one page, mostly `neg_risk`, so `li
 | Task list | `PLAN.md` |
 | Paper-default settings + live gate | `src/arb/config.py` |
 | Paper loop + universe + heartbeat | `src/arb/app.py` |
+| Near-miss / closest book | `src/arb/nearmiss.py` |
+| Hot watch pin + rotate | `src/arb/watch.py` |
+| Local paper alerts | `src/arb/alerts.py` |
 | Ask walk / book store | `src/arb/books.py` |
 | Hunter | `src/arb/hunter.py` |
 | Risk | `src/arb/risk.py` |
@@ -208,5 +215,7 @@ Public API connected. `--max-markets 80` was one page, mostly `neg_risk`, so `li
 | Kill switch | `src/arb/killswitch.py` |
 | Sqlite state | `src/arb/state.py` |
 | Networked paper runner | `scripts/paper_run.py` |
+| Public book recorder | `scripts/record_books.py` |
+| Tape backtest | `scripts/backtest_tape.py` |
 | Read-only UI | `scripts/paper_ui.py` |
 | CLI summary | `scripts/report_paper.py` |

@@ -374,3 +374,31 @@ def run_backtest(
         fills=fills,
         decisions=decisions,
     )
+
+
+def summarize_tape(
+    events: Sequence[dict],
+    config: BacktestConfig | None = None,
+) -> dict[str, object]:
+    """Replay a recorded hour tape. Does not loosen hunt/risk. No live path."""
+    if not events:
+        return {
+            "events": 0,
+            "trades": 0,
+            "completed_pairs": 0,
+            "naked_incidents": 0,
+            "net_pnl": "0",
+            "capital_turns": "0",
+            "verdict": "no_tape",
+        }
+    result = run_backtest(events, config)
+    verdict = "positive" if result.net_pnl > _ZERO else "non_positive"
+    return {
+        "events": len(events),
+        "trades": result.trades,
+        "completed_pairs": result.completed_pairs,
+        "naked_incidents": result.naked_incidents,
+        "net_pnl": str(result.net_pnl),
+        "capital_turns": str(result.capital_turns),
+        "verdict": verdict,
+    }

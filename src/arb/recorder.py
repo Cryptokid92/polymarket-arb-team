@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from arb.books import Book, BookStore
+from arb.books import Book, BookStore, Level
 
 
 def event_ts_ms(event: dict[str, Any]) -> int:
@@ -90,6 +90,27 @@ def frames_from_events(events: Iterable[dict[str, Any]]) -> list[BookFrame]:
                 )
             )
     return frames
+
+
+def _levels_to_rows(levels: list[Level]) -> list[dict[str, str]]:
+    return [{"price": str(level.price), "size": str(level.size)} for level in levels]
+
+
+def book_to_event(book: Book, market_side: str, condition_id: str) -> dict[str, Any]:
+    """Public-book JSONL row compatible with frames_from_events. No orders."""
+    return {
+        "event_type": "book",
+        "ts_ms": book.ts_ms,
+        "timestamp": str(book.ts_ms),
+        "condition_id": condition_id,
+        "token_id": book.token_id,
+        "asset_id": book.token_id,
+        "market_side": str(market_side).upper(),
+        "tick_size": str(book.tick),
+        "min_order_size": str(book.min_order_size),
+        "bids": _levels_to_rows(book.bids),
+        "asks": _levels_to_rows(book.asks),
+    }
 
 
 class BookRecorder:

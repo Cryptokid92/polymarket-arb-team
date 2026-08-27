@@ -6,7 +6,7 @@ from decimal import Decimal
 from pathlib import Path
 
 from arb.adversary import detect_lookahead, detect_mid_fill
-from arb.backtest import BacktestConfig, run_backtest, walk_bids
+from arb.backtest import BacktestConfig, run_backtest, summarize_tape, walk_bids
 from arb.books import Level
 from arb.fees import pair_taker_fees
 from arb.money import d
@@ -100,14 +100,14 @@ def test_reports_required_fields() -> None:
         assert hasattr(result, name)
 
 
-def test_record_books_script_refuses_orders_and_has_no_network() -> None:
+def test_record_books_script_uses_official_public_client_only() -> None:
     source = Path("scripts/record_books.py").read_text(encoding="utf-8")
-    lowered = source.lower()
-    assert "refuses to place orders" in source or "refuses to place orders" in lowered
-    assert "from polymarket" not in lowered
-    assert "import urllib" not in lowered
-    assert "import httpx" not in lowered
-    assert "import requests" not in lowered
+    assert "refuses to place orders" in source
+    assert "AsyncSecureClient" not in source
+    assert "from polymarket import AsyncPublicClient" in source
+    assert "import urllib" not in source
+    assert "import httpx" not in source
+    assert "import requests" not in source
 
     import importlib.util
 
@@ -118,7 +118,19 @@ def test_record_books_script_refuses_orders_and_has_no_network() -> None:
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     assert module.main(["--place-orders"]) == 2
-    assert module.main(["--out", "data/books.jsonl"]) == 0
+
+
+def test_summarize_tape_empty_is_no_tape() -> None:
+    summary = summarize_tape([])
+    assert summary["verdict"] == "no_tape"
+    assert summary["events"] == 0
+
+
+def test_summarize_tape_gap_persist_is_positive() -> None:
+    summary = summarize_tape(load_jsonl(RECORDED), _honest_cfg())
+    assert summary["events"] >= 1
+    assert int(summary["completed_pairs"]) >= 1
+    assert summary["verdict"] == "positive"
 
 
 def test_backtest_public_api_has_no_float_literals() -> None:

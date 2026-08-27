@@ -19,5 +19,6 @@ Do not put live keys, `.env`, paper fills, or sqlite in this folder.
 | [debug-list-all-markets.md](debug-list-all-markets.md) | Grok 24 Aug 2026 | Why `--max-markets 80` was one page of mostly `neg_risk`. |
 | [cursor-batch-books-rotate.md](cursor-batch-books-rotate.md) | Grok 24 Aug 2026 | Batch REST books; rotate a 40-pair watch slice. |
 | [cursor-paper-bankroll-pnl.md](cursor-paper-bankroll-pnl.md) | Grok 24 Aug 2026 | Paper $500 bankroll, fills/PnL, local Start/Stop + rotate slider. |
+| [cursor-paper-trading-helper.md](cursor-paper-trading-helper.md) | 27 Aug 2026 | Near-miss, recorder, honest fills, hot watch, alerts, tape backtest. Task 12 dark. |
 
 Paper only. No `ALLOW_LIVE`.

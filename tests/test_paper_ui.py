@@ -82,6 +82,72 @@ def test_summarize_fixture_counts(tmp_path: Path) -> None:
     assert summary["last_event_age_ms"] == 120_000
 
 
+def test_dashboard_shows_closest_and_alerts(tmp_path: Path) -> None:
+    ui = _load_script()
+    paper = tmp_path / "paper"
+    paper.mkdir()
+    write_paper_stats(
+        paper / "stats.json",
+        PaperRunStats(
+            markets_listed=4,
+            universe=2,
+            best_edge=Decimal("0"),
+            closest_condition_id="c-flat",
+            closest_fillable=Decimal("50"),
+            closest_book_age_ms=80,
+            closest_in_watch=True,
+            closest_thin=False,
+            nearmiss_considers=3,
+            edge_histogram={"0_0.005": 2, "none": 1},
+            completed_pairs=1,
+            naked_incidents=1,
+            alerts=1,
+        ),
+        now_ms=1_700_000_000_500,
+    )
+    (paper / "nearmiss.jsonl").write_text(
+        json.dumps(
+            {
+                "ts_ms": 1_700_000_000_400,
+                "condition_id": "c-flat",
+                "raw_edge": "0",
+                "fillable_shares": "50",
+                "in_watch": True,
+                "thin": False,
+                "book_age_ms": 80,
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (paper / "alerts.jsonl").write_text(
+        json.dumps(
+            {
+                "ts_ms": 1_700_000_000_400,
+                "path": "maker_gtc",
+                "size": "10",
+                "raw_edge": "0.03",
+                "expected_net_edge": "0.30",
+                "outcome": "filled",
+                "condition_id": "c-gap",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    summary = ui.summarize_dashboard(paper, project_root=tmp_path, now_ms=1_700_000_000_500)
+    assert summary["best_edge"] == "0"
+    assert summary["closest"]["condition_id"] == "c-flat"
+    assert summary["paper"]["completed_pairs"] == 1
+    assert summary["paper"]["naked_incidents"] == 1
+    assert summary["recent_nearmiss"][0]["raw_edge"] == "0"
+    assert summary["recent_alerts"][0]["outcome"] == "filled"
+    page = ui.render_html(summary)
+    assert "Closest book this hour" in page
+    assert "c-flat" in page
+    assert "Paper alerts" in page
+
+
 def test_missing_logs_are_zeros_not_invented(tmp_path: Path) -> None:
     ui = _load_script()
     empty = tmp_path / "paper"
@@ -242,6 +308,17 @@ def test_write_paper_stats_has_no_account_fields(tmp_path: Path) -> None:
         "bankroll": "500",
         "daily_pnl": "0",
         "fills": 0,
+        "completed_pairs": 0,
+        "naked_incidents": 0,
+        "alerts": 0,
+        "best_edge": None,
+        "closest_condition_id": None,
+        "closest_fillable": None,
+        "closest_book_age_ms": None,
+        "closest_in_watch": None,
+        "closest_thin": None,
+        "nearmiss_considers": 0,
+        "edge_histogram": {},
         "heartbeat_ms": 1_700_000_000_123,
     }
     blob = path.read_text(encoding="utf-8")

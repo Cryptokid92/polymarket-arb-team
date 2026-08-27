@@ -64,6 +64,10 @@ Paginate every open market. Do not treat `--max-markets` as `page_size`. Subscri
 
 Paper $500 bankroll (not real money). Successful intents paper-fill both legs at VWAPs, settle a completed pair at $1/share, and update `daily_pnl` / remaining bankroll. Local UI Start/Stop pauses or launches `paper_run`; watch-rotate slider is 10–120s. See `docs/plans/cursor-paper-bankroll-pnl.md`.
 
+## Paper trading helper (not Task 12)
+
+Near-miss telemetry, public book recorder, honest paper fills (one-leg miss / maker rest / naked hedge), hot watch pin inside the 40-pair cap, local alerts, tape backtest. Caps unchanged. See `docs/plans/cursor-paper-trading-helper.md`.
+
 ## Remaining
 
-12. Live path (build dark, do not run) — not now
+12. Live path (build dark, do not run) — not now. Agents never create `ALLOW_LIVE`. This host is not a live venue.

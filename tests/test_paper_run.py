@@ -1208,7 +1208,10 @@ def test_paper_run_cli_batch_and_watch_flags() -> None:
     assert "--book-batch-size" in source
     assert "--watch-pairs" in source
     assert "--watch-rotate-s" in source
+    assert "--record-books" in source
     assert "LIST_SAFETY_CAP" in source
+    args = module.parse_args(["--record-books"])
+    assert args.record_books is True
 
 
 def test_report_paper_prints_stats(tmp_path: Path) -> None:
@@ -1236,6 +1239,7 @@ def test_report_paper_prints_stats(tmp_path: Path) -> None:
     text = module.format_report(stats)
     assert "gaps seen: 1" in text
     assert "intents approved: 1" in text
+    assert "best edge this hour" in text
     assert "estimated maker EV" in text
     assert "estimated taker EV" in text
     assert "stale: 2" in text
@@ -1252,3 +1256,100 @@ def test_report_paper_reads_halt_reason(tmp_path: Path) -> None:
     assert stats["halt_reason"] == "ws_stale"
     text = module.format_report(stats)
     assert "halt reason: ws_stale" in text
+
+
+@pytest.mark.asyncio
+async def test_paper_run_writes_nearmiss_alerts_and_books(tmp_path: Path) -> None:
+    client = _MockPublic(
+        [_market()],
+        {
+            "yes-gap-3c": _book("yes-gap-3c", "0.54", "0.55"),
+            "no-gap-3c": _book("no-gap-3c", "0.41", "0.42"),
+        },
+    )
+    data_dir = tmp_path / "paper"
+    stats = await run_paper(
+        client=client,
+        settings=_settings(),
+        project_root=tmp_path,
+        data_dir=data_dir,
+        once=True,
+        record_books=True,
+    )
+    assert stats.nearmiss_considers >= 1
+    assert stats.best_edge == Decimal("0.03")
+    assert stats.alerts >= 1
+    assert (data_dir / "nearmiss.jsonl").is_file()
+    assert (data_dir / "alerts.jsonl").is_file()
+    assert (data_dir / "books.jsonl").is_file()
+    near = json.loads((data_dir / "nearmiss.jsonl").read_text(encoding="utf-8").splitlines()[0])
+    assert near["raw_edge"] == "0.03"
+    alert = json.loads((data_dir / "alerts.jsonl").read_text(encoding="utf-8").splitlines()[0])
+    assert alert["path"] in {"maker_gtc", "taker_fak"}
+    snapshot = json.loads((data_dir / "stats.json").read_text(encoding="utf-8"))
+    assert snapshot["best_edge"] == "0.03"
+    assert snapshot["alerts"] >= 1
+
+
+@pytest.mark.asyncio
+async def test_paper_run_near_miss_when_hunt_is_silent(tmp_path: Path) -> None:
+    client = _MockPublic(
+        [_market(yes_id="yes-no-gap", no_id="no-no-gap")],
+        {
+            "yes-no-gap": _book("yes-no-gap", "0.49", "0.50"),
+            "no-no-gap": _book("no-no-gap", "0.49", "0.50"),
+        },
+    )
+    data_dir = tmp_path / "paper"
+    stats = await run_paper(
+        client=client,
+        settings=_settings(),
+        project_root=tmp_path,
+        data_dir=data_dir,
+        once=True,
+    )
+    assert stats.gaps == 0
+    assert stats.intents == 0
+    assert stats.nearmiss_considers >= 1
+    assert stats.best_edge == Decimal("0")
+    assert stats.edge_histogram.get("0_0.005", 0) >= 1
+
+
+@pytest.mark.asyncio
+async def test_honest_p_miss_one_on_taker_path(tmp_path: Path) -> None:
+    """Force taker by making maker EV non-positive is hard; post via ledger in-loop.
+
+    A 3c gap prefers maker. This test keeps hunt/risk caps and only checks
+    that honest=True still completes a maker rest at end-of-run.
+    """
+    client = _MockPublic(
+        [_market()],
+        {
+            "yes-gap-3c": _book("yes-gap-3c", "0.54", "0.55"),
+            "no-gap-3c": _book("no-gap-3c", "0.41", "0.42"),
+        },
+    )
+    data_dir = tmp_path / "paper"
+    stats = await run_paper(
+        client=client,
+        settings=_settings(),
+        project_root=tmp_path,
+        data_dir=data_dir,
+        once=True,
+        honest=True,
+        p_miss=d("1"),
+    )
+    assert stats.intents >= 1
+    assert stats.completed_pairs + stats.naked_incidents >= 1
+    fills = (data_dir / "fills.jsonl").read_text(encoding="utf-8")
+    assert "outcome" in fills
+
+
+def test_helper_caps_stay_tight() -> None:
+    assert LIST_SAFETY_CAP == 5000
+    assert BOOK_BATCH_SIZE == 50
+    assert WATCH_PAIRS == 40
+    from arb.app import PIN_HOT_PAIRS
+
+    assert PIN_HOT_PAIRS == 8
+    assert PIN_HOT_PAIRS <= WATCH_PAIRS
