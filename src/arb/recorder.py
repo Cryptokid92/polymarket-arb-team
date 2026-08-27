@@ -63,8 +63,8 @@ class BookFrame:
     no: Book
 
 
-def frames_from_events(events: Iterable[dict[str, Any]]) -> list[BookFrame]:
-    """Replay recorded books in time order. Each frame is a post-event YES/NO pair."""
+def _frames_one_market(events: Iterable[dict[str, Any]]) -> list[BookFrame]:
+    """Pair YES/NO for one condition only. Never mix markets."""
     ordered = sorted(events, key=event_ts_ms)
     store = BookStore()
     yes: Book | None = None
@@ -89,6 +89,23 @@ def frames_from_events(events: Iterable[dict[str, Any]]) -> list[BookFrame]:
                     no=no.model_copy(deep=True),
                 )
             )
+    return frames
+
+
+def frames_from_events(events: Iterable[dict[str, Any]]) -> list[BookFrame]:
+    """Replay recorded books in time order. Each frame is a same-market YES/NO pair.
+
+    Multi-market tapes are grouped by condition_id so YES from A is never
+    hunted against NO from B.
+    """
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for event in events:
+        cid = str(event.get("condition_id") or "")
+        grouped.setdefault(cid, []).append(event)
+    frames: list[BookFrame] = []
+    for group in grouped.values():
+        frames.extend(_frames_one_market(group))
+    frames.sort(key=lambda frame: frame.ts_ms)
     return frames
 
 

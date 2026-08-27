@@ -86,6 +86,30 @@ def test_record_books_cli_refuses_place_orders() -> None:
             assert node.func.id != "AsyncSecureClient"
 
 
+def test_frames_do_not_mix_yes_and_no_across_markets() -> None:
+    yes_a = Book(
+        token_id="yes-a",
+        bids=[Level(price=d("0.10"), size=d("80"))],
+        asks=[Level(price=d("0.11"), size=d("80"))],
+        tick=d("0.01"),
+        min_order_size=d("5"),
+        ts_ms=1000,
+    )
+    no_b = Book(
+        token_id="no-b",
+        bids=[Level(price=d("0.10"), size=d("80"))],
+        asks=[Level(price=d("0.11"), size=d("80"))],
+        tick=d("0.01"),
+        min_order_size=d("5"),
+        ts_ms=1000,
+    )
+    events = [
+        book_to_event(yes_a, "YES", "market-a"),
+        book_to_event(no_b, "NO", "market-b"),
+    ]
+    assert frames_from_events(events) == []
+
+
 def test_book_to_event_round_trips_frames() -> None:
     yes = Book(
         token_id="yes-1",
