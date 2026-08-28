@@ -1044,6 +1044,7 @@ def render_html(summary: dict[str, Any]) -> str:
     list_window_s = paper.get("list_window_s", 60)
     list_hold_s = paper.get("list_hold_s", 0)
     list_empty_windows = _int_or_zero(paper.get("list_empty_windows"))
+    list_wraps = _int_or_zero(paper.get("list_wraps"))
     pnl_lost = daily_pnl.startswith("-")
     pnl_label = "lost" if pnl_lost else "earned"
     pnl_class = "lost" if pnl_lost else "earned"
@@ -1103,6 +1104,7 @@ def render_html(summary: dict[str, Any]) -> str:
     )
     list_note = (
         f"list window {_esc(list_window)}"
+        + f" · catalog wraps {_esc(list_wraps)}"
         + f" · next 5000 every {_esc(list_window_s)}s"
         + (
             f" · listing next 5000"
@@ -1443,6 +1445,7 @@ def render_html(summary: dict[str, Any]) -> str:
       {_metric("universe", counts["universe"])}
       {_metric("watching", watching)}
       {_metric("list window", list_window)}
+      {_metric("catalog wraps", list_wraps)}
       {_metric(
           "next 5000 in",
           "listing" if list_next else f"{list_hold_s}s",

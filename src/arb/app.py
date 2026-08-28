@@ -1743,11 +1743,17 @@ async def run_paper(
                 if not new_pairs:
                     stats.list_empty_windows += 1
                     stats.markets_listed = len(window.markets)
-                    persist_list_cursor(window.next_cursor)
                     persist_seen(force=True)
                     refresh_watch_board()
-                    persist_stats()
-                break
+                # Last page repeated or a one-page catalog. Do not end
+                # the hour. Next list is after_cursor=None (first 5000).
+                stats.list_wraps += 1
+                stats.list_window += 1
+                tracker.set_window(stats.list_window)
+                persist_list_cursor(None)
+                next_after = None
+                persist_stats()
+                continue
             if next_after is None:
                 stats.list_wraps += 1
             stats.list_window += 1

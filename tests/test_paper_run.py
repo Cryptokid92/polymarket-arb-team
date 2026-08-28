@@ -1797,6 +1797,105 @@ async def test_list_windows_wrap_when_cursor_exhausted(
 
 
 @pytest.mark.asyncio
+async def test_one_page_catalog_wraps_to_first_page(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A single 5000-page catalog must re-list page 1, not end the hour."""
+    monkeypatch.setattr("arb.app.LIST_SAFETY_CAP", 2)
+
+    class _OnePage(_PagedPublic):
+        async def get_order_books(self, *, token_ids: list[str]):
+            self.book_call_ids.append(list(token_ids))
+            self.book_token_ids.extend(token_ids)
+            books = _two_window_books()
+            return [books[tid] for tid in token_ids if tid in books]
+
+        def subscribe(self, token_ids: list[str]):
+            self.subscribe_calls.append(list(token_ids))
+            self.subscribed_token_ids = list(token_ids)
+            return _keep_subscribe_open([])
+
+    client = _OnePage(_two_window_pages()[:1])
+    stats = await run_paper(
+        client=client,
+        settings=_settings(),
+        project_root=tmp_path,
+        data_dir=tmp_path / "paper",
+        max_markets=0,
+        once=False,
+        seconds=0.5,
+        poll_s=0.05,
+        watch_rotate_s=0,
+        list_window_s=0,
+    )
+    restored = StateStore(tmp_path / "paper" / "state.sqlite").restore()
+    assert restored.halted is False
+    assert client.list_calls >= 3
+    assert stats.list_wraps >= 1
+    assert stats.list_window >= 2
+    assert stats.list_cursor is None
+
+
+@pytest.mark.asyncio
+async def test_repeated_last_page_wraps_to_catalog_start(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When the last cursor repeats the last page, wrap to page 1."""
+    monkeypatch.setattr("arb.app.LIST_SAFETY_CAP", 2)
+
+    class _RepeatLastPaginator(_PagedPaginator):
+        async def _iter_pages(self):
+            if self._start >= len(self._pages):
+                last = self._pages[-1]
+                self.pages_yielded += 1
+                yield SimpleNamespace(items=tuple(last), next_cursor=None)
+                return
+            for index in range(self._start, len(self._pages)):
+                self.pages_yielded += 1
+                yield SimpleNamespace(
+                    items=tuple(self._pages[index]),
+                    next_cursor=f"p{index + 1}",
+                )
+
+    class _RepeatLast(_PagedPublic):
+        def list_markets(self, *, closed: bool = False, page_size: int = 20, **kwargs):
+            self.list_calls += 1
+            self.list_kwargs = {"closed": closed, "page_size": page_size, **kwargs}
+            self.paginator = _RepeatLastPaginator(self.pages)
+            return self.paginator
+
+        async def get_order_books(self, *, token_ids: list[str]):
+            self.book_call_ids.append(list(token_ids))
+            self.book_token_ids.extend(token_ids)
+            books = _two_window_books()
+            return [books[tid] for tid in token_ids if tid in books]
+
+        def subscribe(self, token_ids: list[str]):
+            self.subscribe_calls.append(list(token_ids))
+            self.subscribed_token_ids = list(token_ids)
+            return _keep_subscribe_open([])
+
+    client = _RepeatLast(_two_window_pages())
+    stats = await run_paper(
+        client=client,
+        settings=_settings(),
+        project_root=tmp_path,
+        data_dir=tmp_path / "paper",
+        max_markets=0,
+        once=False,
+        seconds=0.6,
+        poll_s=0.05,
+        watch_rotate_s=0,
+        list_window_s=0,
+    )
+    restored = StateStore(tmp_path / "paper" / "state.sqlite").restore()
+    assert restored.halted is False
+    assert stats.list_wraps >= 1
+    assert stats.listed_unique >= 4
+    assert stats.list_window >= 3
+
+
+@pytest.mark.asyncio
 async def test_list_hold_is_written_before_next_window_lists(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

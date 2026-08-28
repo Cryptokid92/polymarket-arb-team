@@ -76,6 +76,10 @@ The recorded hour was not halted. After 70 completed / 1 naked / 74 intents, the
 
 The recorded hour halted again with `halt_reason=hedge_incidents`, 3 naked maker rows, fees `0`. Makers pay 0 on the venue; this is not a missing-fee bug. The rest model treated “still at our bid” as a fill. When one book moved and the other stayed, poll_rests marked the quiet side filled and hedged it — a false naked. One-sided still-at-bid now cancels both legs. A shown take (ask through / size down) still hedges. Human Start writes `hedge_resume_ms` so evaluate does not re-trip the same three; 3 new hedges / hour still kill.
 
+## Catalog wrap (do not stop the hour)
+
+Listing is 5000-market windows via official `next_cursor`. The hour used to `break` when the next window had the same condition ids and no further cursor — a one-page catalog, or a last-page repeat from Gamma. That looked like “it finished all books and stopped.” The loop now sets `after_cursor=None` (first page of 5000), increments `list_wraps`, and keeps watching until `--seconds`. Dashboard shows **catalog wraps**. Do not raise `LIST_SAFETY_CAP`.
+
 ## Go-live (human, later)
 
 Task 12 stays dark. Agents never create `ALLOW_LIVE`. One positive tape replay is not two separate honest paper hours on a live venue. This host is not a live venue.

@@ -41,6 +41,7 @@ uv run python scripts/paper_run.py --seconds 3600
 # REST books in batches of 50 token ids (up to 4 in flight).
 # Watches 40 pairs (80 tokens); remaining window pairs rotate every 1s.
 # Next 5000 is listed, then the window swaps about every 60s.
+# When the catalog cursor is exhausted, the next list is page 1 again.
 # Do not subscribe all 1540. Do not raise 5000.
 uv run python scripts/paper_run.py --all-markets --seconds 3600
 # equivalent: --max-markets 0
@@ -80,7 +81,7 @@ Writes gitignored JSONL (covered by `data/`):
 - `data/paper/stats.json` — markets listed / universe / unique listed / unique walked plus `bankroll`, `daily_pnl`, `fills`, and `heartbeat_ms` for the dashboard
 - `data/paper/fills.jsonl` — paper fills and completeness PnL (not real money)
 
-`paper_ui.py` shows paper bankroll, realized PnL (earned/lost), intents, fills, unique markets listed/walked across windows, the current list window, and the watch slice. If the JSONL files are missing it shows zeros and does not invent trades. Local Start/Stop pauses or launches `paper_run` (`ARB_MODE=paper`); Start is the human resume for a prior `ws_stale` when no `HALT` file is present. Start does not re-trip on stream age; a failed REST liveness probe still halts. The watch-rotate slider (1–120s) writes `control.json` and does not change risk caps. Data is GET; control POSTs are 127.0.0.1 only. Run status follows the newest JSONL timestamp, `stats.json` mtime, or `heartbeat_ms` — a live runner rewriting stats is **running**, not stale. Halt still comes only from `HALT` / sqlite. `ws_stale` means the stream or REST probe failed, not daily loss. Banner: **PAPER MODE. Not live. Not financial advice.** Auto-refreshes every 2s. Paper $500 is not real money.
+`paper_ui.py` shows paper bankroll, realized PnL (earned/lost), intents, fills, unique markets listed/walked across windows, the current list window, catalog wraps, and the watch slice. If the JSONL files are missing it shows zeros and does not invent trades. Local Start/Stop pauses or launches `paper_run` (`ARB_MODE=paper`); Start is the human resume for a prior `ws_stale` when no `HALT` file is present. Start does not re-trip on stream age; a failed REST liveness probe still halts. The watch-rotate slider (1–120s) writes `control.json` and does not change risk caps. Data is GET; control POSTs are 127.0.0.1 only. Run status follows the newest JSONL timestamp, `stats.json` mtime, or `heartbeat_ms` — a live runner rewriting stats is **running**, not stale. Halt still comes only from `HALT` / sqlite. `ws_stale` means the stream or REST probe failed, not daily loss. Banner: **PAPER MODE. Not live. Not financial advice.** Auto-refreshes every 2s. Paper $500 is not real money.
 
 `report_paper.py` prints: gaps seen, intents approved, estimated maker EV, estimated taker EV, reject reasons.
 

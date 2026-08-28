@@ -679,6 +679,7 @@ def test_html_uses_fullscreen_board_and_histogram_bars(tmp_path: Path) -> None:
     page = ui.render_html(summary)
     assert "Watching now" in page
     assert "list window" in page
+    assert "catalog wraps" in page
     assert "unique listed" in page
     assert "unique walked" in page
     assert "next 5000 every" in page
