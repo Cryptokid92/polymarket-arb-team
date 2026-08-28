@@ -1370,7 +1370,10 @@ async def run_paper(
         except asyncio.CancelledError:
             raise
         except PublicApiError:
-            trip_dead_stream()
+            # Official subscribe often dies after a planned list or aclose
+            # ("WebSocket heartbeat stale; closing"). Probe REST first.
+            if await rest_probe_watch() == 0:
+                trip_dead_stream()
             return
         if time.monotonic() >= deadline:
             return
@@ -1382,32 +1385,27 @@ async def run_paper(
             now = time.monotonic()
             if now >= stop_at:
                 return "swap"
-            rotated.clear()
-            slice_task = asyncio.create_task(consume_slice())
-            rotate_wait = asyncio.create_task(rotated.wait())
+            # Do not cancel subscribe on every 1s rotate. Official aclose
+            # prints heartbeat-stale and trips ws_stale while REST is fine.
+            # REST rotate_watch walks the rotating slice.
             remaining = min(deadline, stop_at) - now
-            done, pending = await asyncio.wait(
-                {slice_task, rotate_wait},
-                timeout=max(0.0, remaining),
-                return_when=asyncio.FIRST_COMPLETED,
-            )
-            # Never await a cancelled subscribe with suppress(CancelledError):
-            # official aclose can hang and eat the 60s swap cancel.
-            for task in pending:
-                await _abandon_task(task)
-            if not done:
+            slice_task = asyncio.create_task(consume_slice())
+            try:
+                await asyncio.wait_for(slice_task, timeout=max(0.01, remaining))
+            except asyncio.TimeoutError:
+                await _abandon_task(slice_task)
                 return "deadline" if time.monotonic() >= deadline else "swap"
-            if slice_task in done and not slice_task.cancelled():
-                if not kill.allow_new_intents():
-                    if listing_may_continue():
-                        leftover = min(deadline, stop_at) - time.monotonic()
-                        if leftover > 0:
-                            await asyncio.sleep(leftover)
-                        return (
-                            "swap" if time.monotonic() < deadline else "deadline"
-                        )
-                    return "halt"
-            # rotate or dead slice: resubscribe the current watch tokens
+            except asyncio.CancelledError:
+                await _abandon_task(slice_task)
+                raise
+            if not kill.allow_new_intents():
+                if listing_may_continue():
+                    leftover = min(deadline, stop_at) - time.monotonic()
+                    if leftover > 0:
+                        await asyncio.sleep(leftover)
+                    return "swap" if time.monotonic() < deadline else "deadline"
+                return "halt"
+            # subscribe ended; REST already probed; try again until swap
         return "deadline"
 
     async def rotate_watch() -> None:

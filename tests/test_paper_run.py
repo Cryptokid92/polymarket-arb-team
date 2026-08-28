@@ -970,9 +970,42 @@ async def test_subscribe_iterator_end_failed_probe_trips_ws_stale(
 
 
 @pytest.mark.asyncio
+async def test_subscribe_iterator_error_successful_probe_does_not_trip(
+    tmp_path: Path,
+) -> None:
+    client = _ErrorStreamPublic([_market()], _gap_books())
+    data_dir = tmp_path / "paper"
+    await run_paper(
+        client=client,
+        settings=_settings(),
+        project_root=tmp_path,
+        data_dir=data_dir,
+        once=False,
+        seconds=0.4,
+        poll_s=0.05,
+    )
+    restored = StateStore(data_dir / "state.sqlite").restore()
+    assert restored.halted is False
+    assert client.book_calls >= 2
+
+
+@pytest.mark.asyncio
 async def test_subscribe_iterator_error_trips_ws_stale(tmp_path: Path) -> None:
     client = _ErrorStreamPublic([_market()], _gap_books())
     data_dir = tmp_path / "paper"
+    first = True
+
+    async def flaky(*, token_ids: list[str]):
+        nonlocal first
+        client.book_calls += 1
+        client.book_call_ids.append(list(token_ids))
+        client.book_token_ids = list(token_ids)
+        if first:
+            first = False
+            return [client.books[tid] for tid in token_ids if tid in client.books]
+        raise TimeoutError("timed out")
+
+    client.get_order_books = flaky  # type: ignore[method-assign]
     await run_paper(
         client=client,
         settings=_settings(),
@@ -1191,10 +1224,11 @@ async def test_watch_rotates_remaining_universe_pairs(tmp_path: Path) -> None:
         watch_rotate_s=0.15,
         book_batch_size=4,
     )
-    seen = {tuple(call) for call in client.subscribe_calls}
-    assert len(seen) >= 2
-    watched = {tid for call in client.subscribe_calls for tid in call}
-    assert {"y0", "n0", "y1", "n1", "y2", "n2", "y3", "n3"} <= watched
+    # Subscribe stays on the first slice. REST rotate walks the rest so
+    # official aclose is not torn down every watch-rotate tick.
+    assert client.subscribe_calls
+    rest_seen = {tid for call in client.book_call_ids for tid in call}
+    assert {"y0", "n0", "y1", "n1", "y2", "n2", "y3", "n3"} <= rest_seen
     snapshot = json.loads((tmp_path / "paper" / "stats.json").read_text(encoding="utf-8"))
     assert snapshot["heartbeat_ms"] > 0
     assert snapshot["universe"] == n
@@ -1675,7 +1709,7 @@ async def test_list_window_swaps_when_subscribe_cancel_hangs(
 
 
 @pytest.mark.asyncio
-async def test_ws_stale_still_lists_next_5000(
+async def test_dead_subscribe_still_lists_next_5000_when_rest_ok(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr("arb.app.LIST_SAFETY_CAP", 2)
@@ -1708,8 +1742,7 @@ async def test_ws_stale_still_lists_next_5000(
         list_window_s=0.2,
     )
     restored = StateStore(tmp_path / "paper" / "state.sqlite").restore()
-    assert restored.halted is True
-    assert restored.halt_reason == "ws_stale"
+    assert restored.halted is False
     assert stats.list_window >= 2
     assert stats.listed_unique >= 4
 
