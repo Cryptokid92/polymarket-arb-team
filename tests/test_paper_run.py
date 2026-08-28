@@ -27,6 +27,7 @@ from arb.app import (
     chunk_ids,
     fetch_book_batches,
     list_cycle_may_continue,
+    list_hold_remaining_s,
     listing_limit,
     pair_token_ids,
     pairs_ready_from_batch,
@@ -1720,6 +1721,94 @@ async def test_list_window_swaps_when_subscribe_cancel_hangs(
     )
     assert stats.list_window >= 2
     assert stats.listed_unique >= 4
+
+
+def test_list_hold_remaining_s_overdue_is_zero() -> None:
+    assert (
+        list_hold_remaining_s(
+            now=100.0, window_until=90.0, hold_s=60.0, pair_count=10
+        )
+        == 0.0
+    )
+    assert (
+        list_hold_remaining_s(
+            now=100.0, window_until=130.0, hold_s=60.0, pair_count=10
+        )
+        == 30.0
+    )
+    assert (
+        list_hold_remaining_s(
+            now=100.0, window_until=130.0, hold_s=0.0, pair_count=10
+        )
+        == 0.0
+    )
+    assert (
+        list_hold_remaining_s(
+            now=100.0, window_until=130.0, hold_s=60.0, pair_count=0
+        )
+        == 0.0
+    )
+
+
+@pytest.mark.asyncio
+async def test_listing_overrun_still_swaps_window(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """If listing the next 5000 eats the dwell, swap without subscribe."""
+    monkeypatch.setattr("arb.app.LIST_SAFETY_CAP", 2)
+
+    class _OverrunList(_PagedPublic):
+        def list_markets(self, *, closed: bool = False, page_size: int = 20, **kwargs):
+            self.list_calls += 1
+            self.list_kwargs = {"closed": closed, "page_size": page_size, **kwargs}
+            if self.list_calls >= 2:
+
+                class _SlowPages(_PagedPaginator):
+                    def from_cursor(inner_self, cursor: str) -> _PagedPaginator:
+                        nxt = super().from_cursor(cursor)
+                        return _SlowPages(nxt._pages, start=nxt._start)
+
+                    async def _iter_pages(inner_self):
+                        await asyncio.sleep(0.2)
+                        async for page in super()._iter_pages():
+                            yield page
+
+                self.paginator = _SlowPages(self.pages)
+                return self.paginator
+            self.paginator = _PagedPaginator(self.pages)
+            return self.paginator
+
+        async def get_order_books(self, *, token_ids: list[str]):
+            self.book_call_ids.append(list(token_ids))
+            self.book_token_ids.extend(token_ids)
+            books = _two_window_books()
+            return [books[tid] for tid in token_ids if tid in books]
+
+        def subscribe(self, token_ids: list[str]):
+            self.subscribe_calls.append(list(token_ids))
+            return _hang_subscribe_on_cancel()
+
+    client = _OverrunList(_two_window_pages())
+    stats = await asyncio.wait_for(
+        run_paper(
+            client=client,
+            settings=_settings(),
+            project_root=tmp_path,
+            data_dir=tmp_path / "paper",
+            max_markets=0,
+            once=False,
+            seconds=0.7,
+            poll_s=0.05,
+            watch_rotate_s=0,
+            list_window_s=0.05,
+        ),
+        timeout=2.5,
+    )
+    assert stats.list_window >= 2
+    assert stats.listed_unique >= 4
+    assert stats.universe >= 2
+    snapshot = json.loads((tmp_path / "paper" / "stats.json").read_text(encoding="utf-8"))
+    assert snapshot["list_window"] >= 2
 
 
 @pytest.mark.asyncio

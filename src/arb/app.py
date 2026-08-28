@@ -162,6 +162,24 @@ class StreamHeartbeat:
         return max(0, now_ms - self.last_receive_ms)
 
 
+def list_hold_remaining_s(
+    *,
+    now: float,
+    window_until: float,
+    hold_s: float,
+    pair_count: int,
+) -> float:
+    """Seconds left on this 5000-window dwell. 0 means swap now.
+
+    Listing the next page can eat the 60s hold. Do not open subscribe
+    when this is already 0 — official aclose / wait_for can sit on
+    window 1 while the next 5000 is already listed.
+    """
+    if hold_s <= 0 or pair_count <= 0:
+        return 0.0
+    return max(0.0, float(window_until) - float(now))
+
+
 def list_cycle_may_continue(
     *,
     halted: bool,
@@ -1515,16 +1533,29 @@ async def run_paper(
             # Do not cancel subscribe on every 1s rotate. Official aclose
             # prints heartbeat-stale and trips ws_stale while REST is fine.
             # REST rotate_watch walks the rotating slice.
-            remaining = min(deadline, stop_at) - now
-            slice_task = asyncio.create_task(consume_slice())
-            try:
-                await asyncio.wait_for(slice_task, timeout=max(0.01, remaining))
-            except asyncio.TimeoutError:
-                await _abandon_task(slice_task)
+            leftover = min(deadline, stop_at) - now
+            if leftover <= 0:
                 return "deadline" if time.monotonic() >= deadline else "swap"
+            slice_task = asyncio.create_task(consume_slice())
+            # Do not use wait_for. Official subscribe aclose often swallows
+            # CancelledError; wait_for then never returns and window 1 sticks.
+            timeout_task = asyncio.create_task(asyncio.sleep(leftover))
+            try:
+                done, _pending = await asyncio.wait(
+                    {slice_task, timeout_task},
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
             except asyncio.CancelledError:
+                await _abandon_task(timeout_task)
                 await _abandon_task(slice_task)
                 raise
+            if timeout_task in done:
+                await _abandon_task(slice_task)
+                return "deadline" if time.monotonic() >= deadline else "swap"
+            await _abandon_task(timeout_task)
+            if slice_task.done() and not slice_task.cancelled():
+                with contextlib.suppress(Exception):
+                    slice_task.result()
             if not kill.allow_new_intents():
                 if listing_may_continue():
                     leftover = min(deadline, stop_at) - time.monotonic()
@@ -1663,11 +1694,14 @@ async def run_paper(
             await _abandon_task(walker)
 
     async def run_watch_until(stop_at: float) -> str:
+        remaining = min(deadline, stop_at) - time.monotonic()
+        if remaining <= 0:
+            return "deadline" if time.monotonic() >= deadline else "swap"
+        # Timer first. Swap must not wait for subscribe() to connect.
+        timer = asyncio.create_task(asyncio.sleep(remaining))
         watch = asyncio.create_task(watch_silence())
         rotator = asyncio.create_task(rotate_watch())
         consume = asyncio.create_task(consume_until(stop_at))
-        remaining = min(deadline, stop_at) - time.monotonic()
-        timer = asyncio.create_task(asyncio.sleep(max(0.0, remaining)))
         reason = "deadline"
         try:
             await asyncio.wait(
@@ -1709,14 +1743,19 @@ async def run_paper(
             # after_cursor=None wraps to the start of the catalog.
             prepared = await prepare_next_keeping_watch(next_after)
             stats.list_next_queued = False
-            stop_at = (
-                time.monotonic()
-                if hold_s <= 0 or not pairs
-                else window_until
+            leftover = list_hold_remaining_s(
+                now=time.monotonic(),
+                window_until=window_until,
+                hold_s=hold_s,
+                pair_count=len(pairs),
             )
-            stats.list_hold_s = max(0.0, stop_at - time.monotonic())
+            stats.list_hold_s = leftover
             persist_stats()
-            reason = await run_watch_until(stop_at)
+            if leftover <= 0:
+                # Listing ate the dwell. Apply the queued window now.
+                reason = "deadline" if time.monotonic() >= deadline else "swap"
+            else:
+                reason = await run_watch_until(time.monotonic() + leftover)
             stats.list_hold_s = 0
             if time.monotonic() >= deadline or reason == "deadline":
                 now_ms = _now_ms()

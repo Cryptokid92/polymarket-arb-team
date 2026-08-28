@@ -84,6 +84,12 @@ Official subscribe dies after list/`aclose`. `watch_silence` then passed stream 
 
 `--watch-pairs` default is 100 (200 token ids). Still batched at 50. Still not the whole universe. `PIN_HOT_PAIRS` stays 8. `min_edge` / `max_open_pairs` / `LIST_SAFETY_CAP` unchanged.
 
+## List window stuck on 1
+
+A clean 1-hour run listed the next 5000 (`listed_unique` 9956, `universe_unique` 3078) but `list_window` stayed 1 and `walked_unique` froze at 1545. `list_cursor.json` already had the next-page cursor. Listing 50 official pages plus the opening snapshot ate the 60s dwell; `run_watch_until` still opened official subscribe. `asyncio.wait_for` on that socket waits for aclose after cancel; official aclose often swallows `CancelledError`, so the swap never ran.
+
+Fix: if leftover hold is 0 after listing, apply the queued window immediately. Do not open subscribe. The dwell timer is created before consume. `consume_until` uses `asyncio.wait` + sleep, not `wait_for`. Caps unchanged. Task 12 stays dark.
+
 ## Catalog wrap (do not stop the hour)
 
 Listing is 5000-market windows via official `next_cursor`. The hour used to `break` when the next window had the same condition ids and no further cursor — a one-page catalog, or a last-page repeat from Gamma. That looked like “it finished all books and stopped.” The loop now sets `after_cursor=None` (first page of 5000), increments `list_wraps`, and keeps watching until `--seconds`. Dashboard shows **catalog wraps**. Do not raise `LIST_SAFETY_CAP`.
