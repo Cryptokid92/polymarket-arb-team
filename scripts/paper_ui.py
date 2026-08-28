@@ -541,6 +541,7 @@ def summarize_dashboard(
         "recent_gaps": _recent_gaps(gaps, recent_limit),
         "recent_intents": _recent_intents(intents, recent_limit),
         "recent_fills": _recent_fills(fills, recent_limit),
+        "why": explain_paper_money(fills),
         "halt": read_halt(data_dir, root),
     }
 
@@ -604,6 +605,152 @@ def _parse_decimal(value: object) -> Decimal | None:
         return Decimal(str(value))
     except (InvalidOperation, TypeError, ValueError):
         return None
+
+
+_MONEY_EDGE_ORDER: tuple[tuple[str, str], ...] = (
+    ("lt_0.01", "<1¢"),
+    ("0.01", "1¢"),
+    ("0.02", "2¢"),
+    ("0.03", "3¢"),
+    ("0.04", "4¢"),
+    ("gte_0.05", "≥5¢"),
+)
+
+
+def _empty_why() -> dict[str, Any]:
+    return {
+        "completed": 0,
+        "naked": 0,
+        "maker_completed": 0,
+        "taker_completed": 0,
+        "maker_pnl": "0",
+        "taker_pnl": "0",
+        "naked_pnl": "0",
+        "fees": "0",
+        "paid": "0",
+        "redeem": "0",
+        "sum_pnl": "0",
+        "avg_pair_px": None,
+        "avg_edge": None,
+        "unique_pairs": 0,
+        "path": "none",
+        "matches_identity": True,
+        "formula": "size * (1 - yes - no) - fees",
+        "edge_buckets": {
+            key: {"pairs": 0, "pnl": "0"} for key, _label in _MONEY_EDGE_ORDER
+        },
+    }
+
+
+def _money_edge_bucket(edge: Decimal) -> str:
+    if edge < Decimal("0.01"):
+        return "lt_0.01"
+    if edge < Decimal("0.02"):
+        return "0.01"
+    if edge < Decimal("0.03"):
+        return "0.02"
+    if edge < Decimal("0.04"):
+        return "0.03"
+    if edge < Decimal("0.05"):
+        return "0.04"
+    return "gte_0.05"
+
+
+def explain_paper_money(fills: list[dict[str, Any]]) -> dict[str, Any]:
+    """Why completed pairs printed. Does not invent trades. Decimal only."""
+    why = _empty_why()
+    if not fills:
+        return why
+    completed = 0
+    naked_n = 0
+    maker_n = 0
+    taker_n = 0
+    maker_pnl = Decimal("0")
+    taker_pnl = Decimal("0")
+    naked_pnl = Decimal("0")
+    fees = Decimal("0")
+    paid = Decimal("0")
+    redeem = Decimal("0")
+    matches = True
+    unique: set[str] = set()
+    buckets = {
+        key: {"pairs": 0, "pnl": Decimal("0")} for key, _label in _MONEY_EDGE_ORDER
+    }
+    for row in fills:
+        size = _parse_decimal(row.get("size"))
+        yes = _parse_decimal(row.get("yes_vwap"))
+        no = _parse_decimal(row.get("no_vwap"))
+        pnl = _parse_decimal(row.get("pnl"))
+        fee = _parse_decimal(row.get("pair_fees")) or Decimal("0")
+        if size is None or yes is None or no is None or pnl is None:
+            continue
+        outcome = row.get("outcome")
+        path = str(row.get("path") or "")
+        if outcome == "naked" or row.get("naked") is True:
+            naked_n += 1
+            naked_pnl += pnl
+            continue
+        if outcome not in (None, "filled"):
+            continue
+        pair_px = yes + no
+        edge = Decimal("1") - pair_px
+        cost = _parse_decimal(row.get("cost"))
+        if cost is None:
+            cost = size * pair_px + fee
+        reconstructed = size * edge - fee
+        if reconstructed != pnl:
+            matches = False
+        completed += 1
+        fees += fee
+        paid += cost
+        redeem += size
+        cid = row.get("condition_id")
+        if cid:
+            unique.add(str(cid))
+        bucket = _money_edge_bucket(edge)
+        buckets[bucket]["pairs"] += 1
+        buckets[bucket]["pnl"] += pnl
+        if path == "taker_fak":
+            taker_n += 1
+            taker_pnl += pnl
+        else:
+            maker_n += 1
+            maker_pnl += pnl
+    if completed == 0 and naked_n == 0:
+        return why
+    if completed == 0:
+        path_name = "none"
+    elif taker_n == 0 and maker_n > 0:
+        path_name = "maker_completeness"
+    elif maker_n == 0 and taker_n > 0:
+        path_name = "taker_hunt"
+    else:
+        path_name = "mixed"
+    avg_pair_px = str(paid / redeem) if redeem > 0 else None
+    avg_edge = str((redeem - paid) / redeem) if redeem > 0 else None
+    return {
+        "completed": completed,
+        "naked": naked_n,
+        "maker_completed": maker_n,
+        "taker_completed": taker_n,
+        "maker_pnl": str(maker_pnl),
+        "taker_pnl": str(taker_pnl),
+        "naked_pnl": str(naked_pnl),
+        "fees": str(fees),
+        "paid": str(paid),
+        "redeem": str(redeem),
+        "sum_pnl": str(maker_pnl + taker_pnl + naked_pnl),
+        "avg_pair_px": avg_pair_px,
+        "avg_edge": avg_edge,
+        "unique_pairs": len(unique),
+        "path": path_name,
+        "matches_identity": matches,
+        "formula": "size * (1 - yes - no) - fees",
+        "edge_buckets": {
+            key: {"pairs": buckets[key]["pairs"], "pnl": str(buckets[key]["pnl"])}
+            for key, _label in _MONEY_EDGE_ORDER
+        },
+    }
 
 
 def _edge_tone(raw: object) -> str:
@@ -779,6 +926,97 @@ def _metric(label: str, value: object, *, extra: str = "", tone: str = "") -> st
     )
 
 
+def _why_qty(value: object, *, places: str = "0.001") -> str:
+    parsed = _parse_decimal(value)
+    if parsed is None:
+        return "—"
+    return str(parsed.quantize(Decimal(places)))
+
+
+def _why_html(why: dict[str, Any], *, hunt_gaps: int = 0) -> str:
+    """Explain paper PnL from fills. Does not invent trades."""
+    completed = _int_or_zero(why.get("completed"))
+    if completed <= 0:
+        return (
+            '<section class="why" id="why-money">'
+            "<h2>Why this paper PnL</h2>"
+            '<p class="empty">No completed pairs yet. Hunt needs ask VWAP '
+            "sum ≤ 0.99. Maker completeness joins both bids when "
+            "yes+no ≤ 0.99. Paper $500 is not real money.</p>"
+            "</section>"
+        )
+    path = str(why.get("path") or "none")
+    path_label = {
+        "maker_completeness": "maker completeness",
+        "taker_hunt": "taker hunt",
+        "mixed": "maker + taker",
+    }.get(path, path)
+    paid_n = _parse_decimal(why.get("paid")) or Decimal("0")
+    redeem_n = _parse_decimal(why.get("redeem")) or Decimal("0")
+    paid_pct = 0
+    if redeem_n > 0 and paid_n > 0:
+        paid_pct = min(
+            100,
+            max(2, int(paid_n * Decimal(100) / redeem_n)),
+        )
+    hunt_note = (
+        "Hunt printed $0 (no ask gap at min_edge 0.01). "
+        if hunt_gaps <= 0
+        else f"Hunt gaps {_esc(hunt_gaps)} — taker PnL { _esc(why.get('taker_pnl')) }. "
+    )
+    buckets = why.get("edge_buckets") or {}
+    peak = max(
+        (
+            _int_or_zero((buckets.get(key) or {}).get("pairs"))
+            for key, _label in _MONEY_EDGE_ORDER
+        ),
+        default=0,
+    )
+    edge_bars = "".join(
+        _bar_track(
+            _int_or_zero((buckets.get(key) or {}).get("pairs")),
+            peak,
+            "hot" if key != "lt_0.01" else "thin",
+            f"{label} · {_esc((buckets.get(key) or {}).get('pnl', '0'))}",
+            key,
+        )
+        for key, label in _MONEY_EDGE_ORDER
+    )
+    return (
+        '<section class="why" id="why-money">'
+        '<div class="why-card">'
+        "<h2>Why this paper PnL</h2>"
+        '<p class="why-eq">size × (1 − yes − no) − fees</p>'
+        '<p class="empty">Buy YES + NO for ≤ $0.99. Pair redeems $1. '
+        "Makers pay 0. Paper $500 is not real money.</p>"
+        f'<p class="why-id">paid {_esc(_why_qty(why.get("paid")))} → '
+        f'redeem {_esc(_why_qty(why.get("redeem"), places="0.01"))} · '
+        f'fees {_esc(why.get("fees"))} · '
+        f'avg pair {_esc(_why_qty(why.get("avg_pair_px"), places="0.0001"))} · '
+        f'avg edge {_esc(_why_qty(why.get("avg_edge"), places="0.0001"))}</p>'
+        f'<div class="why-redeem" title="paid versus $1 redeem">'
+        f'<div class="why-paid" style="width:{paid_pct}%"></div></div>'
+        "</div>"
+        '<div class="why-card">'
+        "<h2>Where the dollars came from</h2>"
+        f'<p class="why-path">{_esc(path_label)}</p>'
+        f'<p class="empty">{hunt_note}'
+        f'{_esc(why.get("maker_completed"))} maker pairs '
+        f'+{_esc(why.get("maker_pnl"))}. '
+        f'{_esc(why.get("taker_completed"))} taker pairs '
+        f'+{_esc(why.get("taker_pnl"))}. '
+        f'naked {_esc(why.get("naked"))} ({_esc(why.get("naked_pnl"))}). '
+        f'{_esc(why.get("unique_pairs"))} distinct markets.</p>'
+        "</div>"
+        '<div class="why-card">'
+        "<h2>Completed edge (filled pairs)</h2>"
+        '<p class="empty">cent buckets of 1 − yes − no. Not walked asks.</p>'
+        f'<div class="bars">{edge_bars}</div>'
+        "</div>"
+        "</section>"
+    )
+
+
 def render_html(summary: dict[str, Any]) -> str:
     counts = summary["counts"]
     paper = summary.get("paper") or {}
@@ -881,6 +1119,7 @@ def render_html(summary: dict[str, Any]) -> str:
         )
     )
     run_status = str(summary["run_status"])
+    why_html = _why_html(summary.get("why") or _empty_why(), hunt_gaps=counts["gaps"])
     return f"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -920,7 +1159,7 @@ def render_html(summary: dict[str, Any]) -> str:
       height: 100vh;
       height: 100dvh;
       display: grid;
-      grid-template-rows: auto auto auto minmax(0, 1fr) auto;
+      grid-template-rows: auto auto auto auto minmax(0, 1fr) auto;
       gap: 10px;
       padding: 10px 12px 8px;
     }}
@@ -1112,6 +1351,38 @@ def render_html(summary: dict[str, Any]) -> str:
     .empty {{ color: var(--muted); }}
     .reason-table {{ margin-top: 8px; }}
     footer {{ color: #6b7c93; font-size: 11px; padding: 0 4px; }}
+    .why {{
+      display: grid;
+      grid-template-columns: minmax(240px, 1.15fr) minmax(220px, 0.95fr) minmax(240px, 1.1fr);
+      gap: 10px;
+      min-height: 0;
+    }}
+    .why-card, .why {{
+      background: color-mix(in srgb, var(--panel) 90%, transparent);
+      border: 1px solid var(--line);
+      border-radius: 12px;
+    }}
+    .why-card {{ padding: 8px 12px; min-width: 0; }}
+    .why-eq {{
+      margin: 0 0 4px;
+      font-family: "IBM Plex Mono", ui-monospace, Menlo, Consolas, monospace;
+      font-size: clamp(14px, 1.6vw, 20px);
+      font-weight: 700;
+      color: var(--green);
+    }}
+    .why-id, .why-path {{
+      margin: 4px 0 6px;
+      font-family: "IBM Plex Mono", ui-monospace, Menlo, Consolas, monospace;
+      font-size: 12px;
+    }}
+    .why-path {{ color: var(--cyan); font-weight: 700; text-transform: uppercase; letter-spacing: 0.04em; }}
+    .why-redeem {{
+      height: 10px; border-radius: 999px; overflow: hidden;
+      background: #1c2736; border: 1px solid var(--line);
+    }}
+    .why-paid {{ height: 100%; background: var(--cyan); }}
+    .why-card .bars {{ gap: 3px; }}
+    .why-card .bar-track {{ height: 7px; }}
     @media (max-width: 1100px) {{
       body {{ overflow: auto; }}
       .board {{ height: auto; min-height: 100vh; }}
@@ -1121,6 +1392,7 @@ def render_html(summary: dict[str, Any]) -> str:
       }}
       .panel-logs {{ display: flex; }}
       .metrics {{ grid-template-columns: repeat(auto-fit, minmax(108px, 1fr)); }}
+      .why {{ grid-template-columns: 1fr; }}
     }}
   </style>
 </head>
@@ -1178,6 +1450,7 @@ def render_html(summary: dict[str, Any]) -> str:
       {_metric("paused", "yes" if paused else "no")}
       {_metric("runner", runner_alive)}
   </div>
+  {why_html}
   <div class="main">
     <section class="panel panel-watch">
       <h2>Closest book this hour</h2>
@@ -1242,11 +1515,11 @@ def render_html(summary: dict[str, Any]) -> str:
       {_rows_html(summary.get("recent_fills") or [], [
         ("path", "path"),
         ("size", "size"),
+        ("yes", "yes_vwap"),
+        ("no", "no_vwap"),
+        ("paid", "cost"),
         ("pnl", "pnl"),
-        ("cost", "cost"),
-        ("yes_vwap", "yes_vwap"),
-        ("no_vwap", "no_vwap"),
-        ("pair_fees", "pair_fees"),
+        ("fees", "pair_fees"),
       ])}
       <h2>Recent intents</h2>
       {_rows_html(summary["recent_intents"], [

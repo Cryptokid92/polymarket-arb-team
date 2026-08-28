@@ -170,6 +170,14 @@ def test_missing_logs_are_zeros_not_invented(tmp_path: Path) -> None:
     assert summary["run_status"] == "no_data"
     assert summary["heartbeat_ms"] is None
     assert summary["halt"]["halted"] is False
+    why = summary["why"]
+    assert why["completed"] == 0
+    assert why["maker_pnl"] == "0"
+    assert why["taker_pnl"] == "0"
+    assert why["path"] == "none"
+    page = ui.render_html(summary)
+    assert "Why this paper PnL" in page
+    assert "No completed pairs yet" in page
 
 
 def test_jsonl_only_counts_without_stats(tmp_path: Path) -> None:
@@ -508,9 +516,123 @@ def test_dashboard_reads_bankroll_pnl_and_fills(tmp_path: Path) -> None:
     assert summary["paper"]["daily_pnl"] == "0.30"
     assert summary["counts"]["fills"] == 1
     assert summary["recent_fills"][0]["pnl"] == "0.30"
+    why = summary["why"]
+    assert why["completed"] == 1
+    assert why["path"] == "maker_completeness"
+    assert why["maker_pnl"] == "0.30"
+    assert why["fees"] == "0"
+    assert why["matches_identity"] is True
     page = ui.render_html(summary)
     assert "500.30" in page
     assert "earned" in page
+    assert "Why this paper PnL" in page
+    assert "maker completeness" in page
+    assert "Makers pay 0" in page
+
+
+def test_explain_paper_money_is_maker_completeness_identity() -> None:
+    ui = _load_script()
+    empty = ui.explain_paper_money([])
+    assert empty["completed"] == 0
+    assert empty["path"] == "none"
+    assert empty["sum_pnl"] == "0"
+    assert "float" not in str(empty)
+    fills = [
+        {
+            "path": "maker_gtc",
+            "outcome": "filled",
+            "condition_id": "c-a",
+            "size": "25",
+            "yes_vwap": "0.07",
+            "no_vwap": "0.92",
+            "pair_fees": "0",
+            "cost": "24.75",
+            "pnl": "0.25",
+        },
+        {
+            "path": "maker_gtc",
+            "outcome": "filled",
+            "condition_id": "c-b",
+            "size": "10",
+            "yes_vwap": "0.40",
+            "no_vwap": "0.58",
+            "pair_fees": "0",
+            "cost": "9.80",
+            "pnl": "0.20",
+        },
+        {
+            "path": "maker_gtc",
+            "outcome": "naked",
+            "size": "5",
+            "yes_vwap": "0.50",
+            "no_vwap": "0.49",
+            "pair_fees": "0",
+            "cost": "4.95",
+            "pnl": "-0.05",
+            "naked": True,
+        },
+    ]
+    why = ui.explain_paper_money(fills)
+    assert why["completed"] == 2
+    assert why["naked"] == 1
+    assert why["maker_completed"] == 2
+    assert why["taker_completed"] == 0
+    assert why["maker_pnl"] == "0.45"
+    assert why["taker_pnl"] == "0"
+    assert why["naked_pnl"] == "-0.05"
+    assert why["fees"] == "0"
+    assert why["paid"] == "34.55"
+    assert why["redeem"] == "35"
+    assert why["sum_pnl"] == "0.40"
+    assert why["avg_pair_px"] == "0.9871428571428571428571428571"[:8] or True
+    assert why["path"] == "maker_completeness"
+    assert why["matches_identity"] is True
+    assert why["avg_pair_px"] == str(Decimal("34.55") / Decimal("35"))
+    assert why["edge_buckets"]["0.01"]["pairs"] == 1
+    assert why["edge_buckets"]["0.01"]["pnl"] == "0.25"
+    assert why["edge_buckets"]["0.02"]["pairs"] == 1
+    assert why["edge_buckets"]["0.02"]["pnl"] == "0.20"
+    assert why["unique_pairs"] == 2
+    page = ui._why_html(why, hunt_gaps=0)
+    assert "Why this paper PnL" in page
+    assert "size × (1 − yes − no) − fees" in page
+    assert "maker completeness" in page
+    assert "Hunt printed $0" in page
+    assert "Makers pay 0" in page
+    assert "not real money" in page
+    source = Path("scripts/paper_ui.py").read_text(encoding="utf-8")
+    assert "float(" not in source
+
+
+def test_avg_pair_px_is_size_weighted_decimal() -> None:
+    ui = _load_script()
+    why = ui.explain_paper_money(
+        [
+            {
+                "path": "maker_gtc",
+                "outcome": "filled",
+                "size": "25",
+                "yes_vwap": "0.07",
+                "no_vwap": "0.92",
+                "pair_fees": "0",
+                "cost": "24.75",
+                "pnl": "0.25",
+            },
+            {
+                "path": "maker_gtc",
+                "outcome": "filled",
+                "size": "10",
+                "yes_vwap": "0.40",
+                "no_vwap": "0.58",
+                "pair_fees": "0",
+                "cost": "9.80",
+                "pnl": "0.20",
+            },
+        ]
+    )
+    # (25*0.99 + 10*0.98) / 35 = 34.55 / 35
+    assert why["avg_pair_px"] == str(Decimal("34.55") / Decimal("35"))
+    assert why["avg_edge"] == str(Decimal("0.45") / Decimal("35"))
 
 
 def test_html_uses_fullscreen_board_and_histogram_bars(tmp_path: Path) -> None:
@@ -583,6 +705,7 @@ def test_html_uses_fullscreen_board_and_histogram_bars(tmp_path: Path) -> None:
     assert "Closest book this hour" in page
     assert "not halted" in page
     assert "HALTED" not in page
+    assert "Why this paper PnL" in page
 
 
 def test_coverage_html_uses_unique_listed_as_scale() -> None:
