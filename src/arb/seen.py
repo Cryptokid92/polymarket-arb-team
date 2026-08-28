@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 SEEN_FILENAME = "seen_markets.json"
+WALKED_FILENAME = "walked.jsonl"
 
 
 class SeenMarkets:
@@ -28,11 +29,14 @@ class SeenMarkets:
             self.listed.add(cid)
             self.universe.add(cid)
 
-    def note_walked(self, condition_id: object) -> None:
+    def note_walked(self, condition_id: object) -> bool:
         cid = _cid(condition_id)
-        if cid:
-            self.listed.add(cid)
-            self.walked.add(cid)
+        if not cid:
+            return False
+        fresh = cid not in self.walked
+        self.listed.add(cid)
+        self.walked.add(cid)
+        return fresh
 
     @property
     def listed_unique(self) -> int:
@@ -63,6 +67,15 @@ class SeenMarkets:
         tmp.write_text(json.dumps(payload) + "\n", encoding="utf-8")
         tmp.replace(path)
 
+    def append_walked(self, data_dir: Path, condition_id: object) -> None:
+        cid = _cid(condition_id)
+        if not cid:
+            return
+        path = Path(data_dir) / WALKED_FILENAME
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps({"condition_id": cid}) + "\n")
+
 
 def _cid(value: object) -> str:
     return str(value or "").strip()
@@ -83,8 +96,11 @@ def load_seen_markets(data_dir: Path) -> SeenMarkets:
                 seen.note_universe(raw)
             for raw in parsed.get("walked") or ():
                 seen.note_walked(raw)
-    _backfill_jsonl(seen, Path(data_dir) / "rejects.jsonl", walked=False)
-    _backfill_jsonl(seen, Path(data_dir) / "nearmiss.jsonl", walked=True)
+    root = Path(data_dir)
+    _backfill_jsonl(seen, root / "rejects.jsonl", walked=False)
+    _backfill_jsonl(seen, root / WALKED_FILENAME, walked=True)
+    _backfill_jsonl(seen, root / "nearmiss.jsonl", walked=True)
+    _backfill_jsonl(seen, root / "books.jsonl", walked=True)
     return seen
 
 
@@ -92,20 +108,21 @@ def _backfill_jsonl(seen: SeenMarkets, path: Path, *, walked: bool) -> None:
     if not path.is_file():
         return
     try:
-        lines = path.read_text(encoding="utf-8").splitlines()
+        handle = path.open(encoding="utf-8")
     except OSError:
         return
-    for line in lines:
-        if not line.strip():
-            continue
-        try:
-            row = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if not isinstance(row, dict):
-            continue
-        cid = row.get("condition_id")
-        if walked:
-            seen.note_walked(cid)
-        else:
-            seen.note_listed(cid)
+    with handle:
+        for line in handle:
+            if not line.strip():
+                continue
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(row, dict):
+                continue
+            cid = row.get("condition_id")
+            if walked:
+                seen.note_walked(cid)
+            else:
+                seen.note_listed(cid)

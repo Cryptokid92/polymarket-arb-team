@@ -1018,7 +1018,8 @@ async def run_paper(
         no = store.get(pair.no_token_id)
         if yes is None or no is None:
             return
-        seen.note_walked(pair.condition_id)
+        if seen.note_walked(pair.condition_id):
+            seen.append_walked(data_dir, pair.condition_id)
         persist_seen()
         now_ms = _now_ms()
         in_watch = pair.condition_id in watch_ids()
