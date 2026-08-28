@@ -70,11 +70,6 @@ def summarize_paper(data_dir: Path) -> dict:
 
     maker_ev = Decimal("0")
     taker_ev = Decimal("0")
-    for gap in gaps:
-        if gap.get("maker_ev") is not None:
-            maker_ev += Decimal(str(gap["maker_ev"]))
-        if gap.get("taker_ev") is not None:
-            taker_ev += Decimal(str(gap["taker_ev"]))
 
     reasons = Counter(str(row.get("reason", "unknown")) for row in rejects)
     for gap in gaps:
@@ -84,21 +79,21 @@ def summarize_paper(data_dir: Path) -> dict:
 
     completed = 0
     naked = 0
+    realized = Decimal("0")
     for fill in fills:
         if fill.get("completed") is True:
             completed += 1
-        if fill.get("naked") is True:
+            realized += Decimal(str(fill.get("pnl", "0")))
+        elif fill.get("naked") is True:
             naked += 1
-    if snapshot.get("completed_pairs") is not None:
-        completed = int(snapshot["completed_pairs"])
-    if snapshot.get("naked_incidents") is not None:
-        naked = int(snapshot["naked_incidents"])
+            realized += Decimal(str(fill.get("pnl", "0")))
 
     return {
         "gaps_seen": len(gaps),
         "intents_approved": len(intents),
         "estimated_maker_ev": maker_ev,
         "estimated_taker_ev": taker_ev,
+        "realized_pnl": realized,
         "reject_reasons": dict(reasons),
         "halt_reason": _halt_reason(data_dir),
         "best_edge": snapshot.get("best_edge"),
@@ -124,6 +119,7 @@ def format_report(stats: dict) -> str:
         f"  intents approved: {stats['intents_approved']}",
         f"  completed pairs: {stats.get('completed_pairs', 0)}",
         f"  naked incidents: {stats.get('naked_incidents', 0)}",
+        f"  realized pnl: {stats.get('realized_pnl', 0)}",
         f"  estimated maker EV: {stats['estimated_maker_ev']}",
         f"  estimated taker EV: {stats['estimated_taker_ev']}",
         f"  best edge this hour: {stats.get('best_edge')}",

@@ -138,14 +138,51 @@ def test_dashboard_shows_closest_and_alerts(tmp_path: Path) -> None:
     summary = ui.summarize_dashboard(paper, project_root=tmp_path, now_ms=1_700_000_000_500)
     assert summary["best_edge"] == "0"
     assert summary["closest"]["condition_id"] == "c-flat"
-    assert summary["paper"]["completed_pairs"] == 1
-    assert summary["paper"]["naked_incidents"] == 1
+    assert summary["paper"]["completed_pairs"] == 0
+    assert summary["paper"]["naked_incidents"] == 0
     assert summary["recent_nearmiss"][0]["raw_edge"] == "0"
     assert summary["recent_alerts"][0]["outcome"] == "filled"
     page = ui.render_html(summary)
     assert "Closest book this hour" in page
     assert "c-flat" in page
     assert "Paper alerts" in page
+
+
+def test_dashboard_stats_without_fills_are_not_completes(tmp_path: Path) -> None:
+    ui = _load_script()
+    paper = tmp_path / "paper"
+    paper.mkdir()
+    write_paper_stats(
+        paper / "stats.json",
+        PaperRunStats(
+            completed_pairs=12,
+            naked_incidents=3,
+            fills=12,
+            daily_pnl=Decimal("99"),
+            bankroll=Decimal("599"),
+        ),
+        now_ms=1_700_000_000_500,
+    )
+    summary = ui.summarize_dashboard(paper, project_root=tmp_path, now_ms=1_700_000_000_500)
+    assert summary["paper"]["completed_pairs"] == 0
+    assert summary["paper"]["naked_incidents"] == 0
+    assert summary["counts"]["fills"] == 0
+    assert summary["paper"]["daily_pnl"] == "0"
+
+
+def test_dashboard_sqlite_pnl_without_fills_is_zero(tmp_path: Path) -> None:
+    ui = _load_script()
+    paper = tmp_path / "paper"
+    paper.mkdir()
+    db = paper / "state.sqlite"
+    conn = sqlite3.connect(db)
+    conn.execute("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+    conn.execute("INSERT INTO meta(key, value) VALUES ('daily_pnl', '77')")
+    conn.commit()
+    conn.close()
+    summary = ui.summarize_dashboard(paper, project_root=tmp_path, now_ms=1)
+    assert summary["counts"]["fills"] == 0
+    assert summary["paper"]["daily_pnl"] == "0"
 
 
 def test_missing_logs_are_zeros_not_invented(tmp_path: Path) -> None:

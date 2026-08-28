@@ -1361,18 +1361,54 @@ def test_report_paper_prints_stats(tmp_path: Path) -> None:
     stats = module.summarize_paper(paper)
     assert stats["gaps_seen"] == 1
     assert stats["intents_approved"] == 1
-    assert stats["estimated_maker_ev"] == Decimal("0.75")
-    assert stats["estimated_taker_ev"] == Decimal("-0.20")
+    assert stats["estimated_maker_ev"] == Decimal("0")
+    assert stats["estimated_taker_ev"] == Decimal("0")
+    assert stats["realized_pnl"] == Decimal("0")
+    assert stats["completed_pairs"] == 0
     assert stats["reject_reasons"]["stale"] == 2
     text = module.format_report(stats)
     assert "gaps seen: 1" in text
     assert "intents approved: 1" in text
     assert "best edge this hour" in text
     assert "maker quotes" in text
-    assert "estimated maker EV" in text
-    assert "estimated taker EV" in text
+    assert "realized pnl: 0" in text
     assert "stale: 2" in text
     assert "halt reason" not in text
+
+
+def test_report_paper_scores_settled_fills_not_gap_ev(tmp_path: Path) -> None:
+    paper = tmp_path / "paper"
+    paper.mkdir()
+    (paper / "gaps.jsonl").write_text(
+        '{"raw_edge":"0.03","maker_ev":"0.75","taker_ev":"-0.20","reject_reason":"stale"}\n',
+        encoding="utf-8",
+    )
+    (paper / "stats.json").write_text(
+        '{"completed_pairs": 12, "naked_incidents": 3, "daily_pnl": "99"}\n',
+        encoding="utf-8",
+    )
+    module = _load_script("report_paper_cli", Path("scripts/report_paper.py"))
+    stats = module.summarize_paper(paper)
+    assert stats["estimated_maker_ev"] == Decimal("0")
+    assert stats["estimated_taker_ev"] == Decimal("0")
+    assert stats["realized_pnl"] == Decimal("0")
+    assert stats["completed_pairs"] == 0
+    assert stats["naked_incidents"] == 0
+
+
+def test_report_paper_sums_fill_pnl(tmp_path: Path) -> None:
+    paper = tmp_path / "paper"
+    paper.mkdir()
+    (paper / "fills.jsonl").write_text(
+        '{"pnl":"0.30","completed":true,"naked":false,"outcome":"filled"}\n'
+        '{"pnl":"-0.10","completed":false,"naked":true,"outcome":"naked"}\n',
+        encoding="utf-8",
+    )
+    module = _load_script("report_paper_cli", Path("scripts/report_paper.py"))
+    stats = module.summarize_paper(paper)
+    assert stats["completed_pairs"] == 1
+    assert stats["naked_incidents"] == 1
+    assert stats["realized_pnl"] == Decimal("0.20")
 
 
 def test_report_paper_reads_halt_reason(tmp_path: Path) -> None:
@@ -1601,16 +1637,7 @@ async def test_long_run_swaps_to_next_list_window(
             _market(condition_id="d", yes_id="yd", no_id="nd"),
         ],
     ]
-    books = {
-        "ya": _book("ya", "0.54", "0.55"),
-        "na": _book("na", "0.41", "0.42"),
-        "yb": _book("yb", "0.54", "0.55"),
-        "nb": _book("nb", "0.41", "0.42"),
-        "yc": _book("yc", "0.54", "0.55"),
-        "nc": _book("nc", "0.41", "0.42"),
-        "yd": _book("yd", "0.54", "0.55"),
-        "nd": _book("nd", "0.41", "0.42"),
-    }
+    books = _two_window_books()
 
     class _PagedSilent(_PagedPublic):
         async def get_order_books(self, *, token_ids: list[str]):
@@ -1659,15 +1686,11 @@ def _two_window_pages() -> list[list[object]]:
 
 
 def _two_window_books() -> dict[str, object]:
+    # Complete 0.49/0.50 books. Listing-window tests must not take a 3c
+    # fee-free hunt (fee_schedule=None) that p_miss-nakeds into a halt.
     return {
-        "ya": _book("ya", "0.54", "0.55"),
-        "na": _book("na", "0.41", "0.42"),
-        "yb": _book("yb", "0.54", "0.55"),
-        "nb": _book("nb", "0.41", "0.42"),
-        "yc": _book("yc", "0.54", "0.55"),
-        "nc": _book("nc", "0.41", "0.42"),
-        "yd": _book("yd", "0.54", "0.55"),
-        "nd": _book("nd", "0.41", "0.42"),
+        tid: _book(tid, "0.49", "0.50")
+        for tid in ("ya", "na", "yb", "nb", "yc", "nc", "yd", "nd")
     }
 
 
