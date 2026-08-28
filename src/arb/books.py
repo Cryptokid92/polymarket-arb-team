@@ -58,6 +58,31 @@ def _best_first_bids(levels: list[Level]) -> list[Level]:
     return sorted(levels, key=lambda lvl: lvl.price, reverse=True)
 
 
+def consume_levels(
+    levels: list[Level],
+    shares: Decimal,
+    *,
+    asks: bool,
+) -> list[Level]:
+    """Remove `shares` from best-first levels. Drop emptied levels."""
+    shares = _reject_float(shares, "shares")
+    if shares <= 0:
+        return list(levels)
+    ordered = _best_first_asks(levels) if asks else _best_first_bids(levels)
+    remaining = shares
+    out: list[Level] = []
+    for level in ordered:
+        if remaining <= 0:
+            out.append(level)
+            continue
+        take = remaining if remaining <= level.size else level.size
+        leftover = level.size - take
+        remaining -= take
+        if leftover > 0:
+            out.append(Level(price=level.price, size=leftover))
+    return out
+
+
 def walk_asks(asks: list[Level], shares: Decimal) -> tuple[Decimal, Decimal] | None:
     """Return (vwap, filled_shares) to buy `shares`. None if depth insufficient."""
     shares = _reject_float(shares, "shares")

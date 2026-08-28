@@ -347,7 +347,9 @@ def run_pipeline_traced(
     approved = approve(gap, portfolio, settings, market_flags)
     if approved is None:
         return PipelineTrace(gap, None, "risk_rejected", maker_ev, taker_ev, near, source)
-    intent = choose_intent(approved, fees, settings.min_edge)
+    intent = choose_intent(
+        approved, fees, settings.min_edge, source=source or "taker"
+    )
     if intent is None:
         return PipelineTrace(
             approved, None, "fee_ev_nonpositive", maker_ev, taker_ev, near, source

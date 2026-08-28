@@ -1,8 +1,9 @@
-"""Fee agent: prefer maker GTC; refuse negative-EV taker. Rebates excluded."""
+"""Fee agent: price ask takes as FAK; rest bids as maker GTC. Rebates excluded."""
 
 from __future__ import annotations
 
 from decimal import Decimal
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, field_validator
 
@@ -38,11 +39,15 @@ def _taker_ev(gap: GapFound, fees: MarketFees, size: Decimal) -> Decimal:
     return net_edge_taker(gap.raw_edge, size, pair_fees) - (_TAKER_BUFFER_PER_SHARE * size)
 
 
-def choose_intent(gap: GapFound, fees: MarketFees, min_edge: Decimal) -> Intent | None:
-    """Compute maker EV and taker EV.
-    Prefer maker_gtc if maker EV > 0.
-    Allow taker_fak only if taker EV > 0 after full protocol fees + Decimal('0.005') per share buffer.
-    Else None.
+def choose_intent(
+    gap: GapFound,
+    fees: MarketFees,
+    min_edge: Decimal,
+    *,
+    source: Literal["taker", "maker"] = "taker",
+) -> Intent | None:
+    """Ask-take (hunt) is taker_fak after fees+buffer, else None.
+    Bid-rest (maker completeness) is maker_gtc when maker EV > 0.
     """
     min_edge = _reject_float(min_edge, "min_edge")
     if gap.raw_edge < min_edge:
@@ -50,21 +55,21 @@ def choose_intent(gap: GapFound, fees: MarketFees, min_edge: Decimal) -> Intent 
 
     size = gap.fillable_shares
     maker_ev = net_edge_maker(gap.raw_edge, size)
-    taker_ev = _taker_ev(gap, fees, size)
-    yes_fee = taker_fee(size, gap.yes_vwap, fees.yes_rate)
-    no_fee = taker_fee(size, gap.no_vwap, fees.no_rate)
 
-    if maker_ev > 0:
-        return Intent(
-            gap=gap,
-            path="maker_gtc",
-            size=size,
-            yes_limit=gap.yes_vwap,
-            no_limit=gap.no_vwap,
-            expected_net_edge=maker_ev,
-            taker_fee_yes=Decimal("0"),
-            taker_fee_no=Decimal("0"),
-        )
+    if source == "maker":
+        if maker_ev > 0:
+            return Intent(
+                gap=gap,
+                path="maker_gtc",
+                size=size,
+                yes_limit=gap.yes_vwap,
+                no_limit=gap.no_vwap,
+                expected_net_edge=maker_ev,
+                taker_fee_yes=Decimal("0"),
+                taker_fee_no=Decimal("0"),
+            )
+        return None
+    taker_ev = _taker_ev(gap, fees, size)
     if taker_ev > 0:
         return Intent(
             gap=gap,
@@ -73,7 +78,7 @@ def choose_intent(gap: GapFound, fees: MarketFees, min_edge: Decimal) -> Intent 
             yes_limit=gap.yes_vwap,
             no_limit=gap.no_vwap,
             expected_net_edge=taker_ev,
-            taker_fee_yes=yes_fee,
-            taker_fee_no=no_fee,
+            taker_fee_yes=taker_fee(size, gap.yes_vwap, fees.yes_rate),
+            taker_fee_no=taker_fee(size, gap.no_vwap, fees.no_rate),
         )
     return None
