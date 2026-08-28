@@ -557,6 +557,33 @@ def _edge_tone(raw: object) -> str:
     return "cold"
 
 
+def _edge_meter_html(raw: object) -> str:
+    """Visual walk from cold books toward hunt. Does not change min_edge."""
+    lo = Decimal("-0.05")
+    hi = Decimal("0.02")
+    hunt = Decimal("0.01")
+    span = hi - lo
+    edge = _parse_decimal(raw)
+    if edge is None:
+        return '<div class="meter empty-meter">No walked edge yet</div>'
+    clamped = min(hi, max(lo, edge))
+    pct = int((clamped - lo) * Decimal(100) / span)
+    hunt_pct = int((hunt - lo) * Decimal(100) / span)
+    need = hunt - edge
+    need_q = need.quantize(Decimal("0.0001"))
+    need_label = f"need {need_q:+} to hunt" if need > 0 else "at or above min_edge"
+    return (
+        f'<div class="meter" aria-label="edge meter">'
+        f'<div class="meter-track">'
+        f'<div class="meter-hunt" style="left:{hunt_pct}%"></div>'
+        f'<div class="meter-dot { _edge_tone(edge) }" style="left:{pct}%"></div>'
+        f"</div>"
+        f'<div class="meter-scale"><span>−5¢</span><span>hunt +1¢</span><span>+2¢</span></div>'
+        f'<p class="meter-need">{_esc(need_label)}</p>'
+        f"</div>"
+    )
+
+
 def _bar_track(count: int, peak: int, tone: str, label: str, raw_key: str) -> str:
     width = 0
     if peak > 0 and count > 0:
@@ -643,6 +670,7 @@ def render_html(summary: dict[str, Any]) -> str:
             f'<div class="hero-edge {edge_tone}">'
             f'<div class="hero-k">best walked edge</div>'
             f'<div class="hero-n">{_esc(best_edge if best_edge is not None else "—")}</div>'
+            f"{_edge_meter_html(best_edge)}"
             f'<p>best edge <strong>{_esc(best_edge)}</strong>'
             f' · pair {_esc(closest.get("condition_id"))}'
             f' · fillable {_esc(closest.get("fillable"))}'
@@ -782,13 +810,18 @@ def render_html(summary: dict[str, Any]) -> str:
     .metric.wide {{ grid-column: span 1; }}
     .main {{
       display: grid;
-      grid-template-columns: minmax(0, 1.15fr) minmax(0, 0.95fr);
-      grid-template-rows: minmax(0, 1fr) minmax(0, 1fr);
+      grid-template-columns: minmax(0, 1fr) minmax(0, 1.15fr);
+      grid-template-rows: auto minmax(0, 1fr);
       gap: 10px;
       min-height: 0;
     }}
-    .panel {{ padding: 10px 12px; min-height: 0; overflow: auto; }}
-    .hero-edge {{ padding: 12px 14px; }}
+    .panel {{
+      padding: 10px 12px; min-height: 0; overflow: auto;
+      display: flex; flex-direction: column;
+    }}
+    .panel-hist {{ grid-column: 2; grid-row: 1 / span 2; }}
+    .panel .bars {{ flex: 1; justify-content: space-evenly; }}
+    .hero-edge {{ padding: 4px 2px 0; }}
     .hero-n {{
       font-family: "IBM Plex Mono", ui-monospace, Menlo, Consolas, monospace;
       font-size: clamp(36px, 5vw, 64px); font-weight: 800; line-height: 1;
@@ -810,14 +843,38 @@ def render_html(summary: dict[str, Any]) -> str:
     }}
     .bar-n, .v, td {{ font-variant-numeric: tabular-nums; }}
     .bar-key {{ color: #6b7c93; font-family: ui-monospace, Menlo, Consolas, monospace; }}
-    .bar-track {{ height: 8px; background: #1a2230; border-radius: 99px; overflow: hidden; }}
+    .bar-track {{
+      height: 14px; background: #1a2230; border-radius: 99px; overflow: hidden;
+      box-shadow: inset 0 0 0 1px #243044;
+    }}
     .bar-fill {{ height: 100%; border-radius: 99px; }}
-    .bar-fill.cold {{ background: #fb7185; }}
-    .bar-fill.cool {{ background: var(--cool); }}
-    .bar-fill.close {{ background: #fbbf24; }}
-    .bar-fill.near {{ background: var(--amber); }}
-    .bar-fill.hot {{ background: var(--green); }}
+    .bar-fill.cold {{ background: linear-gradient(90deg, #9f1239, #fb7185); box-shadow: 0 0 12px #fb718866; }}
+    .bar-fill.cool {{ background: linear-gradient(90deg, #1d4ed8, var(--cool)); }}
+    .bar-fill.close {{ background: linear-gradient(90deg, #b45309, #fbbf24); box-shadow: 0 0 12px #fbbf2466; }}
+    .bar-fill.near {{ background: linear-gradient(90deg, #a16207, var(--amber)); box-shadow: 0 0 14px #f5c14a66; }}
+    .bar-fill.hot {{ background: linear-gradient(90deg, #047857, var(--green)); box-shadow: 0 0 14px #34d39966; }}
     .bar-fill.thin {{ background: #64748b; }}
+    .meter {{ margin: 10px 0 12px; }}
+    .meter-track {{
+      position: relative; height: 16px; border-radius: 99px;
+      background: linear-gradient(90deg, #fb7185 0%, #fbbf24 60%, #34d399 85%, #5eead4 100%);
+      box-shadow: inset 0 0 0 1px #243044;
+    }}
+    .meter-hunt {{
+      position: absolute; top: -3px; bottom: -3px; width: 2px;
+      background: #fff; box-shadow: 0 0 8px #fff;
+    }}
+    .meter-dot {{
+      position: absolute; top: 50%; width: 14px; height: 14px; margin: -7px 0 0 -7px;
+      border-radius: 50%; background: #fff; border: 2px solid #0b0d12;
+      box-shadow: 0 0 0 3px #f5c14a88;
+    }}
+    .meter-scale {{
+      display: flex; justify-content: space-between; color: var(--muted);
+      font-size: 10px; margin-top: 4px;
+    }}
+    .meter-need {{ margin: 6px 0 0; color: var(--amber); font-size: 13px; font-weight: 700; }}
+    .reason-table {{ display: none; }}
     table.sheet {{ width: 100%; border-collapse: collapse; font-size: 12px; }}
     th, td {{
       text-align: left; padding: 5px 6px; border-bottom: 1px solid var(--line);
@@ -831,7 +888,8 @@ def render_html(summary: dict[str, Any]) -> str:
     @media (max-width: 1100px) {{
       body {{ overflow: auto; }}
       .board {{ height: auto; min-height: 100vh; }}
-      .top, .main {{ grid-template-columns: 1fr; }}
+      .top, .main {{ grid-template-columns: 1fr; grid-template-rows: auto; }}
+      .panel-hist {{ grid-column: auto; grid-row: auto; }}
       .metrics {{ grid-template-columns: repeat(auto-fit, minmax(108px, 1fr)); }}
     }}
   </style>
@@ -885,7 +943,7 @@ def render_html(summary: dict[str, Any]) -> str:
       <h2>Closest book this hour</h2>
       {closest_html}
     </section>
-    <section class="panel">
+    <section class="panel panel-hist">
       <h2>Edge histogram (walked asks; thin is none)</h2>
       <p class="empty">considers {_esc(considers)} · hunt stays silent below min_edge 0.01</p>
       {_hist_bars_html(histogram)}
