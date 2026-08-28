@@ -264,6 +264,38 @@ async def test_honest_maker_rests_then_fills_after_timeout(tmp_path: Path) -> No
     assert later[0].pnl == Decimal("0.30")
 
 
+@pytest.mark.asyncio
+async def test_missing_books_after_timeout_cancel_rest_and_free_slot(
+    tmp_path: Path,
+) -> None:
+    yes, no, _payload = _load_pair("gap_3c.json")
+    books = BookStore()
+    store = StateStore(tmp_path / "state.sqlite")
+    ledger = PaperLedger(
+        store,
+        bankroll=d("500"),
+        daily_pnl=d("0"),
+        honest=True,
+        maker_rest_ms=400,
+    )
+    first = await ledger.try_fill(
+        _maker_intent(d("10")), FEE_FREE, now_ms=1_000, yes=yes, no=no
+    )
+    assert first.outcome == "resting"
+    assert ledger.resting_pairs == 1
+    still = await ledger.poll_rests(books, now_ms=1_200)
+    assert still == []
+    assert ledger.resting_pairs == 1
+    later = await ledger.poll_rests(books, now_ms=1_400)
+    assert len(later) == 1
+    assert later[0].outcome == "canceled"
+    assert later[0].completed is False
+    assert later[0].naked is False
+    assert later[0].pnl == Decimal("0")
+    assert ledger.resting_pairs == 0
+    assert ledger.bankroll == Decimal("500")
+
+
 def test_ledger_never_uses_float_or_secure_client() -> None:
     import arb.paper_ledger as mod
 

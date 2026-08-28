@@ -68,6 +68,10 @@ Cause: `consider()` and the already-halted `watch_silence` tick passed `heartbea
 
 Fix: `consider()` and the halted silence tick pass `ws_age_ms=0`. Liveness stays `watch_silence` + REST probe; `trip_dead_stream` only if that probe returns 0. After `ws_stale`, leftover window sleep wakes on human Start instead of waiting out the 60s hold. Same-dir restart keeps `completed_pairs` / maker-quote counters from `stats.json`. Caps unchanged. Task 12 stays dark.
 
+## Completed pairs froze at 70 (`max_open_pairs`)
+
+The recorded hour was not halted. After 70 completed / 1 naked / 74 intents, the next 80+ maker quotes were all `max_open_pairs`. Three honest maker rests were still in memory. `poll_rests` kept them forever when a 5000-window `retain()` dropped their books (`yes is None or no is None: still.append`). `max_open_pairs` 3 is the real cap; it must not stay full of dead rests. Missing-book rests now cancel after `maker_rest_ms`. Window swap force-expires rests before retain. Do not raise `max_open_pairs`.
+
 ## Go-live (human, later)
 
 Task 12 stays dark. Agents never create `ALLOW_LIVE`. One positive tape replay is not two separate honest paper hours on a live venue. This host is not a live venue.

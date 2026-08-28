@@ -1764,6 +1764,9 @@ async def run_paper(
                 refresh_watch_board()
                 persist_stats()
                 continue
+            # Settle rests against the current store before retain() drops
+            # those books. Missing-book rests must not pin max_open_pairs.
+            await expire_rests(force_timeout=True)
             replace_pairs(new_pairs)
             stats.universe = len(pairs)
             persist_stats()

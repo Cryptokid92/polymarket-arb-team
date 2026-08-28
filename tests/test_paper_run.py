@@ -2170,6 +2170,13 @@ def test_pairs_ready_from_batch_requires_both_books() -> None:
     assert pairs_ready_from_batch([pair], ["other"], store) == []
 
 
+def test_window_swap_expires_rests_before_retain() -> None:
+    source = Path("src/arb/app.py").read_text(encoding="utf-8")
+    swap = source.split("if not new_pairs:", 1)[1]
+    swap = swap.split("replace_pairs(new_pairs)", 1)[0]
+    assert "await expire_rests(force_timeout=True)" in swap
+
+
 def test_consider_does_not_evaluate_stream_age() -> None:
     source = Path("src/arb/app.py").read_text(encoding="utf-8")
     consider = source.split("async def consider(pair: UniversePair)", 1)[1]
