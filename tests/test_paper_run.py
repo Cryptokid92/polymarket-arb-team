@@ -1796,6 +1796,167 @@ async def test_list_hold_is_written_before_next_window_lists(
 
 
 @pytest.mark.asyncio
+async def test_empty_universe_windows_are_skipped_immediately(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("arb.app.LIST_SAFETY_CAP", 2)
+    pages = [
+        [
+            _market(condition_id="n1", yes_id="yn1", no_id="nn1", neg_risk=True),
+            _market(condition_id="n2", yes_id="yn2", no_id="nn2", delay=5),
+        ],
+        [
+            _market(condition_id="c", yes_id="yc", no_id="nc"),
+            _market(condition_id="d", yes_id="yd", no_id="nd"),
+        ],
+    ]
+    books = {
+        "yc": _book("yc", "0.54", "0.55"),
+        "nc": _book("nc", "0.41", "0.42"),
+        "yd": _book("yd", "0.54", "0.55"),
+        "nd": _book("nd", "0.41", "0.42"),
+    }
+
+    class _SkipEmpty(_PagedPublic):
+        async def get_order_books(self, *, token_ids: list[str]):
+            self.book_call_ids.append(list(token_ids))
+            self.book_token_ids.extend(token_ids)
+            return [books[tid] for tid in token_ids if tid in books]
+
+        def subscribe(self, token_ids: list[str]):
+            self.subscribe_calls.append(list(token_ids))
+            return _keep_subscribe_open([])
+
+    client = _SkipEmpty(pages)
+    stats = await asyncio.wait_for(
+        run_paper(
+            client=client,
+            settings=_settings(),
+            project_root=tmp_path,
+            data_dir=tmp_path / "paper",
+            max_markets=0,
+            once=False,
+            seconds=0.5,
+            poll_s=0.05,
+            watch_rotate_s=0,
+            list_window_s=10,
+        ),
+        timeout=2.5,
+    )
+    assert stats.list_window >= 2
+    assert stats.list_empty_windows >= 1
+    assert stats.universe >= 2
+    assert stats.watching >= 1
+
+
+@pytest.mark.asyncio
+async def test_empty_watch_does_not_trip_ws_stale(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("arb.app.LIST_SAFETY_CAP", 2)
+    pages = [
+        [
+            _market(condition_id="n1", yes_id="yn1", no_id="nn1", neg_risk=True),
+            _market(condition_id="n2", yes_id="yn2", no_id="nn2", neg_risk=True),
+        ],
+        [
+            _market(condition_id="n3", yes_id="yn3", no_id="nn3", neg_risk=True),
+            _market(condition_id="n4", yes_id="yn4", no_id="nn4", neg_risk=True),
+        ],
+    ]
+
+    class _AllFiltered(_PagedPublic):
+        async def get_order_books(self, *, token_ids: list[str]):
+            self.book_call_ids.append(list(token_ids))
+            return []
+
+        def subscribe(self, token_ids: list[str]):
+            raise AssertionError("empty watch must not subscribe")
+
+    client = _AllFiltered(pages)
+    stats = await asyncio.wait_for(
+        run_paper(
+            client=client,
+            settings=_settings(ws_stale_ms=80),
+            project_root=tmp_path,
+            data_dir=tmp_path / "paper",
+            max_markets=0,
+            once=False,
+            seconds=0.35,
+            poll_s=0.05,
+            watch_rotate_s=0,
+            list_window_s=0,
+        ),
+        timeout=2.5,
+    )
+    restored = StateStore(tmp_path / "paper" / "state.sqlite").restore()
+    assert restored.halted is False
+    assert stats.list_empty_windows >= 1
+    assert stats.listed_unique >= 2
+
+
+@pytest.mark.asyncio
+async def test_fresh_run_clears_leftover_ws_stale(tmp_path: Path) -> None:
+    data_dir = tmp_path / "paper"
+    data_dir.mkdir()
+    store = StateStore(data_dir / "state.sqlite")
+    store.set_halted(True, reason="ws_stale")
+    client = _MockPublic(
+        [_market()],
+        {
+            "yes-gap-3c": _book("yes-gap-3c", "0.54", "0.55"),
+            "no-gap-3c": _book("no-gap-3c", "0.41", "0.42"),
+        },
+    )
+    await run_paper(
+        client=client,
+        settings=_settings(),
+        project_root=tmp_path,
+        data_dir=data_dir,
+        once=True,
+    )
+    restored = store.restore()
+    assert restored.halted is False
+    assert restored.halt_reason == ""
+
+
+@pytest.mark.asyncio
+async def test_fresh_run_keeps_daily_loss_and_halt_file(tmp_path: Path) -> None:
+    data_dir = tmp_path / "paper"
+    data_dir.mkdir()
+    store = StateStore(data_dir / "state.sqlite")
+    store.set_halted(True, reason="daily_loss")
+    client = _MockPublic(
+        [_market()],
+        {
+            "yes-gap-3c": _book("yes-gap-3c", "0.54", "0.55"),
+            "no-gap-3c": _book("no-gap-3c", "0.41", "0.42"),
+        },
+    )
+    await run_paper(
+        client=client,
+        settings=_settings(),
+        project_root=tmp_path,
+        data_dir=data_dir,
+        once=True,
+    )
+    assert store.restore().halted is True
+    assert store.restore().halt_reason == "daily_loss"
+    store.set_halted(False)
+    store.set_halted(True, reason="ws_stale")
+    (tmp_path / "HALT").write_text("stop\n", encoding="utf-8")
+    await run_paper(
+        client=client,
+        settings=_settings(),
+        project_root=tmp_path,
+        data_dir=data_dir,
+        once=True,
+    )
+    assert store.restore().halted is True
+    assert store.restore().halt_reason == "ws_stale"
+
+
+@pytest.mark.asyncio
 async def test_consider_only_pairs_ready_from_batch(tmp_path: Path) -> None:
     n = 4
     client = _MockPublic(_gap_markets(n), _gap_books_n(n))

@@ -373,6 +373,7 @@ def summarize_dashboard(
     walked_unique = 0
     list_window_s = 60
     list_hold_s = 0
+    list_empty_windows = 0
     best_edge = None
     closest: dict[str, Any] | None = None
     edge_histogram: dict[str, Any] = {}
@@ -391,6 +392,7 @@ def summarize_dashboard(
         walked_unique = _int_or_zero(stats.get("walked_unique"))
         list_window_s = _int_or_zero(stats.get("list_window_s")) or 60
         list_hold_s = _int_or_zero(stats.get("list_hold_s"))
+        list_empty_windows = _int_or_zero(stats.get("list_empty_windows"))
         jsonl_gaps = max(jsonl_gaps, _int_or_zero(stats.get("gaps")))
         jsonl_intents = max(jsonl_intents, _int_or_zero(stats.get("intents")))
         jsonl_rejects = max(jsonl_rejects, _int_or_zero(stats.get("rejects")))
@@ -504,6 +506,7 @@ def summarize_dashboard(
             "walked_unique": walked_unique,
             "list_window_s": list_window_s,
             "list_hold_s": list_hold_s,
+            "list_empty_windows": list_empty_windows,
             "best_edge": best_edge,
             "closest": closest,
             "edge_histogram": edge_histogram,
@@ -680,26 +683,47 @@ def _reason_bars_html(reasons: dict[str, Any]) -> str:
     )
 
 
-def _watch_html(rows: list[dict[str, Any]]) -> str:
-    if not rows:
-        return '<p class="empty">No watch slice yet. The runner has not subscribed.</p>'
-    parts: list[str] = []
-    for row in rows:
-        tone = _edge_tone(row.get("raw_edge"))
-        kind = "pin" if row.get("pinned") else "rot"
-        kind_label = "pin" if row.get("pinned") else "rot"
-        edge = row.get("raw_edge")
-        edge_txt = "—" if edge is None else str(edge)
-        parts.append(
-            f'<div class="watch-row {kind} {tone}">'
-            f'<span class="watch-kind">{kind_label}</span>'
-            f'<span class="watch-label" title="{_esc(row.get("condition_id"))}">'
-            f'{_esc(row.get("label"))}</span>'
-            f'<span class="watch-edge">{_esc(edge_txt)}</span>'
-            f'<span class="watch-id">{_esc(row.get("condition_id"))}</span>'
-            f"</div>"
+def _watch_html(
+    rows: list[dict[str, Any]],
+    *,
+    listing: bool = False,
+    empty_windows: int = 0,
+    window_listed: int = 0,
+    universe: int = 0,
+) -> str:
+    if rows:
+        parts: list[str] = []
+        for row in rows:
+            tone = _edge_tone(row.get("raw_edge"))
+            kind = "pin" if row.get("pinned") else "rot"
+            kind_label = "pin" if row.get("pinned") else "rot"
+            edge = row.get("raw_edge")
+            edge_txt = "—" if edge is None else str(edge)
+            parts.append(
+                f'<div class="watch-row {kind} {tone}">'
+                f'<span class="watch-kind">{kind_label}</span>'
+                f'<span class="watch-label" title="{_esc(row.get("condition_id"))}">'
+                f'{_esc(row.get("label"))}</span>'
+                f'<span class="watch-edge">{_esc(edge_txt)}</span>'
+                f'<span class="watch-id">{_esc(row.get("condition_id"))}</span>'
+                f"</div>"
+            )
+        return f'<div class="watch-list">{"".join(parts)}</div>'
+    if listing:
+        return (
+            '<p class="empty">Listing the next 5000. '
+            "Websocket is down on purpose so list_markets is not starved.</p>"
         )
-    return f'<div class="watch-list">{"".join(parts)}</div>'
+    if window_listed > 0 and universe == 0:
+        skipped = f" Skipped {empty_windows} empty windows." if empty_windows else ""
+        return (
+            '<p class="empty">This 5000 were all filtered '
+            f"(neg-risk / delay).{skipped} Listing the next window.</p>"
+        )
+    return (
+        '<p class="empty">No tradeable pairs in the current window yet. '
+        "Waiting on the next 5000.</p>"
+    )
 
 
 def _coverage_html(
@@ -762,6 +786,7 @@ def render_html(summary: dict[str, Any]) -> str:
     walked_unique = paper.get("walked_unique", 0)
     list_window_s = paper.get("list_window_s", 60)
     list_hold_s = paper.get("list_hold_s", 0)
+    list_empty_windows = _int_or_zero(paper.get("list_empty_windows"))
     pnl_lost = daily_pnl.startswith("-")
     pnl_label = "lost" if pnl_lost else "earned"
     pnl_class = "lost" if pnl_lost else "earned"
@@ -793,7 +818,8 @@ def render_html(summary: dict[str, Any]) -> str:
     halt_reason = halt.get("halt_reason") or "none"
     if halt.get("halted") and halt_reason == "ws_stale":
         halt_hint = (
-            "ws_stale means the stream or REST probe failed, not daily loss. "
+            "ws_stale pauses new paper intents (quiet or failed stream), "
+            "not daily loss. Listing the next 5000 still continues. "
             "Start (human) clears it when no HALT file is present."
         )
     elif halt.get("halted") and halt_reason == "daily_loss":
@@ -828,6 +854,11 @@ def render_html(summary: dict[str, Any]) -> str:
         + (
             " · walked this window; waiting on next list pages"
             if plateau
+            else ""
+        )
+        + (
+            f" · skipped {_esc(paper.get('list_empty_windows', 0))} empty windows"
+            if _int_or_zero(paper.get("list_empty_windows")) > 0
             else ""
         )
     )
@@ -1118,6 +1149,7 @@ def render_html(summary: dict[str, Any]) -> str:
           "next 5000 in",
           "listing" if list_next else f"{list_hold_s}s",
       )}
+      {_metric("empty windows", list_empty_windows)}
       {_metric("gaps", counts["gaps"])}
       {_metric("intents", counts["intents"])}
       {_metric("rejects", counts["rejects"])}
@@ -1140,7 +1172,13 @@ def render_html(summary: dict[str, Any]) -> str:
             walked_unique=walked_unique,
             window_listed=counts["markets_listed"],
         )}
-        {_watch_html(watch_rows)}
+        {_watch_html(
+            watch_rows,
+            listing=list_next,
+            empty_windows=list_empty_windows,
+            window_listed=_int_or_zero(counts["markets_listed"]),
+            universe=_int_or_zero(counts["universe"]),
+        )}
       </div>
     </section>
     <section class="panel panel-hist">

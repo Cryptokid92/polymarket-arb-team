@@ -132,6 +132,7 @@ class PaperRunStats:
     listed_unique: int = 0
     universe_unique: int = 0
     walked_unique: int = 0
+    list_empty_windows: int = 0
 
 
 class StreamHeartbeat:
@@ -450,6 +451,7 @@ def write_paper_stats(
         "listed_unique": stats.listed_unique,
         "universe_unique": stats.universe_unique,
         "walked_unique": stats.walked_unique,
+        "list_empty_windows": stats.list_empty_windows,
         "heartbeat_ms": _now_ms() if now_ms is None else now_ms,
     }
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -873,6 +875,16 @@ async def run_paper(
         settings=settings,
     )
     restored = state.restore()
+    if (
+        restored.halted
+        and (restored.halt_reason or "") == "ws_stale"
+        and not (project_root / "HALT").is_file()
+        and not (Path(data_dir) / "HALT").is_file()
+    ):
+        # New process, new subscribe. Not evaluate() auto-resume.
+        # daily_loss / HALT file stay halted.
+        state.set_halted(False)
+        restored = state.restore()
     starting_bankroll = (
         restored.bankroll
         if restored.bankroll is not None
@@ -976,6 +988,8 @@ async def run_paper(
     stats.markets_listed = len(listed_window.markets)
     replace_pairs(ingest_markets(listed_window.markets))
     stats.universe = len(pairs)
+    if not pairs:
+        stats.list_empty_windows += 1
     persist_list_cursor(listed_window.next_cursor)
     batch_size = max(1, int(book_batch_size))
     watch_n = max(1, int(watch_pairs))
@@ -1236,7 +1250,8 @@ async def run_paper(
             clear_pid(data_dir)
             raise
 
-    if once or not all_token_ids:
+    catalog_done = listed_window.next_cursor is None
+    if once or (not all_token_ids and catalog_done):
         await expire_rests(force_timeout=True)
         _sync_tracker_stats(stats, tracker)
         refresh_watch_board()
@@ -1311,6 +1326,8 @@ async def run_paper(
             await consider(pair)
 
     async def rest_probe_watch() -> int:
+        if not current_watch_tokens():
+            return 1
         probe_ok = 0
         probe_timeout_s = max(0.05, settings.ws_stale_ms / 1000)
 
@@ -1337,6 +1354,8 @@ async def run_paper(
 
     async def consume_slice() -> None:
         tokens = current_watch_tokens()
+        if not tokens:
+            return
         try:
             async for update in _updates(
                 client,
@@ -1445,6 +1464,8 @@ async def run_paper(
         interval_s = max(0.02, min(poll_s, settings.ws_stale_ms / 1000))
         while True:
             await asyncio.sleep(interval_s)
+            if not current_watch_tokens():
+                continue
             now_ms = _now_ms()
             if not kill.allow_new_intents():
                 kill.evaluate(
@@ -1533,7 +1554,11 @@ async def run_paper(
             # after_cursor=None wraps to the start of the catalog.
             prepared = await prepare_next_window(next_after)
             stats.list_next_queued = False
-            stop_at = time.monotonic() if hold_s <= 0 else window_until
+            stop_at = (
+                time.monotonic()
+                if hold_s <= 0 or not pairs
+                else window_until
+            )
             stats.list_hold_s = max(0.0, stop_at - time.monotonic())
             write_paper_stats(stats_path, stats)
             reason = await run_watch_until(stop_at)
@@ -1560,17 +1585,31 @@ async def run_paper(
             new_ids = {pair.condition_id for pair in new_pairs}
             old_ids = {pair.condition_id for pair in pairs}
             if new_ids == old_ids and window.next_cursor is None:
+                if not new_pairs:
+                    stats.list_empty_windows += 1
+                    stats.markets_listed = len(window.markets)
+                    persist_list_cursor(window.next_cursor)
+                    persist_seen(force=True)
+                    refresh_watch_board()
+                    write_paper_stats(stats_path, stats)
                 break
             if next_after is None:
                 stats.list_wraps += 1
             stats.list_window += 1
-            replace_pairs(new_pairs)
             stats.markets_listed = len(window.markets)
-            stats.universe = len(pairs)
             persist_list_cursor(window.next_cursor)
             next_after = window.next_cursor
             stats.list_next_queued = False
             persist_seen(force=True)
+            if not new_pairs:
+                # All filtered (neg-risk / delay). Keep the last tradeable
+                # watch slice and list the next 5000 immediately.
+                stats.list_empty_windows += 1
+                refresh_watch_board()
+                write_paper_stats(stats_path, stats)
+                continue
+            replace_pairs(new_pairs)
+            stats.universe = len(pairs)
             write_paper_stats(stats_path, stats)
             await snapshot_current(raise_if_all_fail=False)
             window_started = time.monotonic()

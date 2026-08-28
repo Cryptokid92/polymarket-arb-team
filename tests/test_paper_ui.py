@@ -221,7 +221,8 @@ def test_halt_from_readonly_sqlite(tmp_path: Path) -> None:
     assert summary["halt"]["halt_reason"] == "ws_stale"
     page = ui.render_html(summary)
     assert "ws_stale" in page
-    assert "stream or REST probe failed" in page
+    assert "pauses new paper intents" in page
+    assert "Listing the next 5000 still continues" in page
     assert "not daily loss" in page
 
 
@@ -331,6 +332,7 @@ def test_write_paper_stats_has_no_account_fields(tmp_path: Path) -> None:
         "listed_unique": 0,
         "universe_unique": 0,
         "walked_unique": 0,
+        "list_empty_windows": 0,
         "heartbeat_ms": 1_700_000_000_123,
     }
     blob = path.read_text(encoding="utf-8")
@@ -556,6 +558,7 @@ def test_html_uses_fullscreen_board_and_histogram_bars(tmp_path: Path) -> None:
     assert "unique walked" in page
     assert "next 5000 every" in page
     assert "next 5000 in" in page
+    assert "empty windows" in page
     assert "Different markets gone through" in page
     assert "9000" in page
     assert "800" in page
@@ -595,6 +598,21 @@ def test_coverage_html_uses_unique_listed_as_scale() -> None:
         listed_unique=0, universe_unique=0, walked_unique=0, window_listed=0
     )
     assert "No unique markets yet" in empty
+
+
+def test_watch_html_explains_filtered_and_listing_states() -> None:
+    ui = _load_script()
+    listing = ui._watch_html([], listing=True)
+    assert "Listing the next 5000" in listing
+    assert "has not subscribed" not in listing
+    filtered = ui._watch_html(
+        [], listing=False, empty_windows=3, window_listed=5000, universe=0
+    )
+    assert "all filtered" in filtered
+    assert "Skipped 3 empty windows" in filtered
+    waiting = ui._watch_html([])
+    assert "Waiting on the next 5000" in waiting
+    assert "has not subscribed" not in waiting
 
 
 def test_list_note_explains_walked_plateau_while_next_window_lists(
