@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from arb.backtest import analyze_tape_edges, summarize_tape
+from arb.backtest import analyze_tape_edges, replay_tape_path, summarize_tape
 from arb.recorder import load_jsonl
 
 
@@ -38,3 +38,8 @@ def test_backtest_tape_replays_fixture(capsys) -> None:
     events = load_jsonl(tape)
     assert summarize_tape(events)["verdict"] == "positive"
     assert analyze_tape_edges(events)["decision"] == "capture"
+    streamed_edges, streamed_tape = replay_tape_path(tape)
+    assert streamed_tape["verdict"] == "positive"
+    assert streamed_edges["decision"] == "capture"
+    assert streamed_tape["events"] == len(events)
+    assert streamed_tape["completed_pairs"] == summarize_tape(events)["completed_pairs"]

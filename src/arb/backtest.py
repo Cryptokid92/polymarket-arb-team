@@ -6,6 +6,7 @@ import random
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from decimal import Decimal
+from pathlib import Path
 from typing import Literal
 
 from arb.books import Book, Level, _reject_float, walk_asks
@@ -15,7 +16,7 @@ from arb.maker import maker_complete_quotes
 from arb.merge import mergeable
 from arb.naked_leg import hedge_plan
 from arb.nearmiss import NearMissTracker, measure_pair
-from arb.recorder import BookFrame, frames_from_events
+from arb.recorder import BookFrame, events_by_condition, frames_from_events
 
 _ONE = Decimal("1")
 _ZERO = Decimal("0")
@@ -241,6 +242,8 @@ def _hedge_fill(
 def run_backtest(
     events: Sequence[dict],
     config: BacktestConfig | None = None,
+    *,
+    keep_trace: bool = True,
 ) -> BacktestResult:
     cfg = config or BacktestConfig()
     frames = frames_from_events(events)
@@ -257,13 +260,14 @@ def run_backtest(
     i = 0
     while i < len(frames):
         frame = frames[i]
-        decisions.append(
-            DecisionRecord(
-                t_ms=frame.ts_ms,
-                yes_book_ts_ms=frame.yes.ts_ms,
-                no_book_ts_ms=frame.no.ts_ms,
+        if keep_trace:
+            decisions.append(
+                DecisionRecord(
+                    t_ms=frame.ts_ms,
+                    yes_book_ts_ms=frame.yes.ts_ms,
+                    no_book_ts_ms=frame.no.ts_ms,
+                )
             )
-        )
         gap = hunt(
             frame.yes,
             frame.no,
@@ -382,10 +386,12 @@ def run_backtest(
         yes_sz = yes_fill.size if yes_fill is not None else _ZERO
         no_sz = no_fill.size if no_fill is not None else _ZERO
         if yes_fill is not None:
-            fills.append(yes_fill)
+            if keep_trace:
+                fills.append(yes_fill)
             buy_notional += yes_fill.price * yes_fill.size
         if no_fill is not None:
-            fills.append(no_fill)
+            if keep_trace:
+                fills.append(no_fill)
             buy_notional += no_fill.price * no_fill.size
 
         fees = _ZERO
@@ -439,7 +445,8 @@ def run_backtest(
                 decision_ts_ms=frame.ts_ms,
                 slippage=cfg.hedge_slippage,
             )
-            fills.append(hedge)
+            if keep_trace:
+                fills.append(hedge)
             pnl += proceeds - (buy_px * plan.size)
 
         i += 1
@@ -543,3 +550,107 @@ def summarize_tape(
         "capital_turns": str(result.capital_turns),
         "verdict": verdict,
     }
+
+
+def replay_tape_path(
+    path: Path,
+    config: BacktestConfig | None = None,
+) -> tuple[dict[str, object], dict[str, object]]:
+    """Analyze + backtest one condition at a time. Do not load a 1GB tape."""
+    cfg = config or BacktestConfig()
+    tracker = NearMissTracker()
+    frames_n = 0
+    ask_gap_frames = 0
+    maker_frames = 0
+    events_n = 0
+    trades = 0
+    completed = 0
+    naked = 0
+    pnl = _ZERO
+    buy_notional = _ZERO
+    saw_any = False
+    for _cid, events in events_by_condition(path):
+        saw_any = True
+        events_n += len(events)
+        frames = frames_from_events(events)
+        frames_n += len(frames)
+        for frame in frames:
+            min_sz = frame.yes.min_order_size
+            if frame.no.min_order_size > min_sz:
+                min_sz = frame.no.min_order_size
+            if min_sz < cfg.min_size:
+                min_sz = cfg.min_size
+            miss = measure_pair(
+                frame.yes,
+                frame.no,
+                min_sz,
+                cfg.max_shares,
+                frame.ts_ms,
+                condition_id="",
+                in_watch=True,
+            )
+            tracker.observe(miss)
+            if miss.raw_edge is not None and miss.raw_edge >= cfg.min_edge:
+                ask_gap_frames += 1
+            quotes = maker_complete_quotes(
+                frame.yes,
+                frame.no,
+                min_edge=cfg.min_edge,
+                max_gap=cfg.max_gap,
+                min_size=min_sz,
+                max_notional=cfg.max_notional,
+                stale_ms=cfg.stale_ms,
+                now_ms=frame.ts_ms,
+            )
+            if quotes is not None:
+                maker_frames += 1
+        result = run_backtest(events, cfg, keep_trace=False)
+        trades += result.trades
+        completed += result.completed_pairs
+        naked += result.naked_incidents
+        pnl += result.net_pnl
+        buy_notional += result.capital_turns * cfg.starting_capital
+    if not saw_any:
+        return (
+            {
+                "frames": 0,
+                "ask_gap_frames": 0,
+                "maker_quote_frames": 0,
+                "best_ask_edge": None,
+                "edge_histogram": {},
+                "edge_thresholds": {},
+                "decision": "maker_completeness",
+            },
+            {
+                "events": 0,
+                "trades": 0,
+                "completed_pairs": 0,
+                "naked_incidents": 0,
+                "net_pnl": "0",
+                "capital_turns": "0",
+                "verdict": "no_tape",
+            },
+        )
+    snap = tracker.snapshot()
+    decision = "capture" if ask_gap_frames > 0 else "maker_completeness"
+    capital = cfg.starting_capital
+    turns = buy_notional / capital if capital > _ZERO else _ZERO
+    analysis = {
+        "frames": frames_n,
+        "ask_gap_frames": ask_gap_frames,
+        "maker_quote_frames": maker_frames,
+        "best_ask_edge": snap["best_edge"],
+        "edge_histogram": snap["edge_histogram"],
+        "edge_thresholds": snap["edge_thresholds"],
+        "decision": decision,
+    }
+    summary = {
+        "events": events_n,
+        "trades": trades,
+        "completed_pairs": completed,
+        "naked_incidents": naked,
+        "net_pnl": str(pnl),
+        "capital_turns": str(turns),
+        "verdict": "positive" if pnl > _ZERO else "non_positive",
+    }
+    return analysis, summary

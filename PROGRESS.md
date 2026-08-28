@@ -80,4 +80,5 @@ Paper money path (Milestone 13, not Task 12): Phase A telemetry + watch-while-li
 - Evidence: `docs/debug-reports/2026-08-28-paper-money-path.md`
 - `uv run pytest -q` — 279 passed
 - List-window stall: if listing the next 5000 eats the 60s dwell, swap immediately (do not open subscribe). Window 1 must not stick after the next page is already listed.
+- Clean hour exited: `list_window=69`, `completed_pairs=520`, `naked_incidents=0`, paper `daily_pnl=235.690`. Tape replay OOM'd on the 1.1GB `books.jsonl` and the gitignored dir was lost. `backtest_tape.py` now streams per market. No tape verdict. Do not go live.
 - `ALLOW_LIVE` was not created. Live trading is not enabled. No secrets committed.

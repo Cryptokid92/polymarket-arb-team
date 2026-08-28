@@ -71,7 +71,7 @@ uv run python scripts/record_books.py --all-markets --once --out data/paper/book
 uv run python scripts/backtest_tape.py --tape data/paper/books.jsonl
 ```
 
-If the tape backtest verdict is `non_positive`, stop. Do not loosen risk. Do not go live.
+`backtest_tape.py` streams one market at a time so a 1GB hour tape does not have to sit in RAM. If the tape backtest verdict is `non_positive`, stop. Do not loosen risk. Do not go live.
 
 Writes gitignored JSONL (covered by `data/`):
 

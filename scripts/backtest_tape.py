@@ -13,8 +13,7 @@ import json
 import sys
 from pathlib import Path
 
-from arb.backtest import analyze_tape_edges, summarize_tape
-from arb.recorder import load_jsonl
+from arb.backtest import replay_tape_path, summarize_tape
 
 
 def format_edge_report(analysis: dict) -> str:
@@ -88,9 +87,7 @@ def main(argv: list[str] | None = None) -> int:
         summary = summarize_tape([])
         print(format_tape_report(summary))
         return 0
-    events = load_jsonl(path)
-    analysis = analyze_tape_edges(events)
-    summary = summarize_tape(events)
+    analysis, summary = replay_tape_path(path)
     print(format_edge_report(analysis))
     print(format_tape_report(summary))
     print(json.dumps({"edges": analysis, "tape": summary}, separators=(",", ":")))

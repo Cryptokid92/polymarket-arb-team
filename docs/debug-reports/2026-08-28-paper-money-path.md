@@ -94,6 +94,46 @@ Fix: if leftover hold is 0 after listing, apply the queued window immediately. D
 
 Listing is 5000-market windows via official `next_cursor`. The hour used to `break` when the next window had the same condition ids and no further cursor — a one-page catalog, or a last-page repeat from Gamma. That looked like “it finished all books and stopped.” The loop now sets `after_cursor=None` (first page of 5000), increments `list_wraps`, and keeps watching until `--seconds`. Dashboard shows **catalog wraps**. Do not raise `LIST_SAFETY_CAP`.
 
+## Clean hour (data/paper-hour-20260828)
+
+Command:
+
+```bash
+ARB_MODE=paper python scripts/paper_run.py --all-markets --seconds 3600 --record-books --watch-pairs 100 --data-dir data/paper-hour-20260828
+```
+
+Started 09:50:36 UTC after the list-window swap fix. `paper_run done` at ~10:50 UTC. Not halted. `list_window` ended at **69** (`list_wraps=1`). Window 1 did not stick.
+
+Live paper counters at exit (from `stats.json` / stdout; gitignored dir):
+
+| Field | Value |
+|---|---|
+| completed pairs | 520 |
+| fills | 520 |
+| intents | 533 |
+| maker quotes | 934 |
+| gaps | 0 |
+| naked incidents | 0 |
+| bankroll | `735.690` |
+| daily_pnl | `235.690` |
+| listed unique | 186_509 |
+| universe unique | 13_598 |
+| walked unique | 13_582 |
+| best ask edge | `-0.001` |
+| `gt_0` / `gte_0.01` | 0 / 0 |
+| max_open_pairs rejects | 259 |
+| hedge incidents | 0 |
+
+`report_paper.py` on that dir matched: 0 taker gaps, Phase C maker path, 0 naked. Paper $500 is not real money.
+
+### Tape replay OOM — file gone
+
+`books.jsonl` was 1.1 GB / 984_618 events. `load_jsonl` slurped the whole file; RSS hit ~14 GB and the kernel OOM-killed other processes. After that, `data/` and `.venv` were gone. `backtest_tape.py --tape data/paper-hour-20260828/books.jsonl` now returns `no_tape`.
+
+Do **not** treat the live `daily_pnl` as a tape verdict. Without the recorded books, Phase A/C replay is not re-runnable. Do not loosen `min_edge`. Do not go live. Task 12 stays dark.
+
+`backtest_tape.py` now streams one `condition_id` at a time (`replay_tape_path`) so the next hour tape does not load 1 GB of JSON into RAM.
+
 ## Go-live (human, later)
 
-Task 12 stays dark. Agents never create `ALLOW_LIVE`. One positive tape replay is not two separate honest paper hours on a live venue. This host is not a live venue.
+Task 12 stays dark. Agents never create `ALLOW_LIVE`. One positive tape replay is not two separate honest paper hours on a live venue. This host is not a live venue. A missing tape is not a pass.
