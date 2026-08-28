@@ -98,7 +98,7 @@ class PaperLedger:
         *,
         bankroll: Decimal,
         daily_pnl: Decimal,
-        honest: bool = False,
+        honest: bool = True,
         p_miss: Decimal = Decimal("0.3"),
         rng_seed: int = 0,
         hedge_slippage: Decimal = Decimal("0.01"),
@@ -305,7 +305,8 @@ class PaperLedger:
 
         if intent.path == "maker_gtc":
             if yes is None or no is None:
-                return await self._complete_pair(intent, fees, now_ms, mode=mode)
+                # Honest maker without both books must not invent a pair.
+                return self._rejected(intent, fees, "missing_books")
             self._rests.append(
                 RestingPair(
                     intent=intent,

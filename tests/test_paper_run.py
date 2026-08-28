@@ -1561,6 +1561,28 @@ async def test_paper_run_near_miss_when_hunt_is_silent(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_run_paper_quiet_no_gap_omits_honest_prints_no_pnl(
+    tmp_path: Path,
+) -> None:
+    client = _MockPublic(
+        [_market(yes_id="yes-no-gap", no_id="no-no-gap")],
+        {
+            "yes-no-gap": _book("yes-no-gap", "0.49", "0.50"),
+            "no-no-gap": _book("no-no-gap", "0.49", "0.50"),
+        },
+    )
+    stats = await run_paper(
+        client=client,
+        settings=_settings(),
+        project_root=tmp_path,
+        data_dir=tmp_path / "paper",
+        once=True,
+    )
+    assert stats.completed_pairs == 0
+    assert stats.daily_pnl == Decimal("0")
+
+
+@pytest.mark.asyncio
 async def test_honest_p_miss_one_on_taker_path(tmp_path: Path) -> None:
     """Force taker by making maker EV non-positive is hard; post via ledger in-loop.
 
@@ -1988,6 +2010,7 @@ async def test_dead_subscribe_still_lists_next_5000_when_rest_ok(
         poll_s=0.05,
         watch_rotate_s=0,
         list_window_s=0.2,
+        p_miss=d("0"),
     )
     restored = StateStore(tmp_path / "paper" / "state.sqlite").restore()
     assert restored.halted is False

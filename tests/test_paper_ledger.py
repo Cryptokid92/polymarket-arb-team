@@ -129,10 +129,15 @@ def test_pair_cost_is_size_times_vwaps_plus_fees() -> None:
     assert pair_cost(taker, CRYPTO) == Decimal("10.04")
 
 
+def test_paper_ledger_honest_kwarg_defaults_true() -> None:
+    default = inspect.signature(PaperLedger.__init__).parameters["honest"].default
+    assert default is True
+
+
 @pytest.mark.asyncio
 async def test_maker_fill_settles_and_updates_bankroll(tmp_path: Path) -> None:
     store = StateStore(tmp_path / "state.sqlite")
-    ledger = PaperLedger(store, bankroll=d("500"), daily_pnl=d("0"))
+    ledger = PaperLedger(store, bankroll=d("500"), daily_pnl=d("0"), honest=False)
     result = await ledger.try_fill(_maker_intent(d("10")), CRYPTO, now_ms=1_000)
     assert result.accepted is True
     assert result.reject_reason is None
@@ -151,7 +156,7 @@ async def test_maker_fill_settles_and_updates_bankroll(tmp_path: Path) -> None:
 @pytest.mark.asyncio
 async def test_taker_fill_subtracts_protocol_fees(tmp_path: Path) -> None:
     store = StateStore(tmp_path / "state.sqlite")
-    ledger = PaperLedger(store, bankroll=d("500"), daily_pnl=d("0"))
+    ledger = PaperLedger(store, bankroll=d("500"), daily_pnl=d("0"), honest=False)
     result = await ledger.try_fill(_taker_intent(d("10")), CRYPTO, now_ms=2_000)
     assert result.accepted is True
     assert result.pair_fees == Decimal("0.34")
@@ -180,7 +185,7 @@ async def test_equal_bankroll_and_cost_is_allowed(tmp_path: Path) -> None:
     store = StateStore(tmp_path / "state.sqlite")
     intent = _maker_intent(d("10"))
     cost = pair_cost(intent, FEE_FREE)
-    ledger = PaperLedger(store, bankroll=cost, daily_pnl=d("0"))
+    ledger = PaperLedger(store, bankroll=cost, daily_pnl=d("0"), honest=False)
     result = await ledger.try_fill(intent, FEE_FREE, now_ms=4_000)
     assert result.accepted is True
     assert result.bankroll == cost + result.pnl
@@ -244,6 +249,51 @@ async def test_honest_maker_rests_then_cancels_when_touch_holds(tmp_path: Path) 
     assert later[0].outcome == "canceled"
     assert later[0].completed is False
     assert later[0].pnl == Decimal("0")
+
+
+@pytest.mark.asyncio
+async def test_default_honest_maker_rests_then_cancels_when_touch_holds(
+    tmp_path: Path,
+) -> None:
+    yes, no, _payload = _load_pair("gap_3c.json")
+    books = BookStore()
+    _put_book(books, yes.token_id, "0.54", "0.55")
+    _put_book(books, no.token_id, "0.41", "0.42")
+    store = StateStore(tmp_path / "state.sqlite")
+    ledger = PaperLedger(store, bankroll=d("500"), daily_pnl=d("0"))
+    first = await ledger.try_fill(
+        _bid_maker_intent(d("10")), FEE_FREE, now_ms=1_000, yes=yes, no=no
+    )
+    assert first.outcome == "resting"
+    assert first.pnl == Decimal("0")
+    assert first.completed is False
+    assert ledger.bankroll == Decimal("500")
+    later = await ledger.poll_rests(books, now_ms=1_400)
+    assert len(later) == 1
+    assert later[0].outcome == "canceled"
+    assert later[0].completed is False
+    assert later[0].pnl == Decimal("0")
+
+
+@pytest.mark.asyncio
+async def test_honest_maker_missing_book_does_not_complete(tmp_path: Path) -> None:
+    store = StateStore(tmp_path / "state.sqlite")
+    ledger = PaperLedger(
+        store,
+        bankroll=d("500"),
+        daily_pnl=d("0"),
+        honest=True,
+    )
+    result = await ledger.try_fill(
+        _maker_intent(d("10")), FEE_FREE, now_ms=1_000, yes=None
+    )
+    assert result.completed is False
+    assert result.pnl == Decimal("0")
+    assert result.outcome in {"resting", "rejected", "canceled"}
+    assert ledger.bankroll == Decimal("500")
+    restored = store.restore()
+    assert restored.fills == []
+    assert restored.bankroll is None
 
 
 @pytest.mark.asyncio
