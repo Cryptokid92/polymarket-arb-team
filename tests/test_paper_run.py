@@ -21,6 +21,7 @@ from arb.app import (
     WATCH_PAIRS,
     WATCH_ROTATE_S,
     PublicApiError,
+    PaperRunStats,
     StreamHeartbeat,
     _iter_listed_markets,
     chunk_ids,
@@ -31,12 +32,15 @@ from arb.app import (
     pairs_ready_from_batch,
     read_list_cursor_state,
     reject_universe,
+    restore_progress_from_stats,
     run_paper,
+    sleep_while_listing_paused,
     stream_liveness_probe_due,
     watch_slice,
 )
 from arb.config import Settings
 from arb.money import d
+from arb.paper_control import apply_control
 from arb.state import StateStore
 
 
@@ -2164,3 +2168,124 @@ def test_pairs_ready_from_batch_requires_both_books() -> None:
     )
     assert pairs_ready_from_batch([pair], ["yes"], store) == [pair]
     assert pairs_ready_from_batch([pair], ["other"], store) == []
+
+
+def test_consider_does_not_evaluate_stream_age() -> None:
+    source = Path("src/arb/app.py").read_text(encoding="utf-8")
+    consider = source.split("async def consider(pair: UniversePair)", 1)[1]
+    consider = consider.split("all_token_ids = pair_token_ids", 1)[0]
+    assert "ws_age_ms=0" in consider
+    assert "heartbeat.age_ms" not in consider
+    silence = source.split("async def watch_silence", 1)[1]
+    silence = silence.split("def listing_progress", 1)[0]
+    halted_branch = silence.split("if not kill.allow_new_intents()", 1)[1]
+    halted_branch = halted_branch.split("age = heartbeat.age_ms", 1)[0]
+    assert "ws_age_ms=0" in halted_branch
+    assert "heartbeat.age_ms" not in halted_branch
+
+
+def test_restore_progress_from_stats_keeps_hour_counters(tmp_path: Path) -> None:
+    path = tmp_path / "stats.json"
+    path.write_text(
+        json.dumps(
+            {
+                "completed_pairs": 5,
+                "naked_incidents": 0,
+                "maker_quotes": 139,
+                "intents": 5,
+                "alerts": 5,
+                "gaps": 0,
+                "fills": 5,
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    stats = PaperRunStats()
+    restore_progress_from_stats(path, stats)
+    assert stats.completed_pairs == 5
+    assert stats.maker_quotes == 139
+    assert stats.intents == 5
+    assert stats.alerts == 5
+    assert stats.gaps == 0
+    assert stats.fills == 0
+
+
+@pytest.mark.asyncio
+async def test_sleep_while_listing_paused_wakes_on_resume() -> None:
+    flags = {"halted": True}
+
+    async def later() -> None:
+        await asyncio.sleep(0.04)
+        flags["halted"] = False
+
+    task = asyncio.create_task(later())
+    woke = await sleep_while_listing_paused(
+        2.0,
+        should_resume=lambda: not flags["halted"],
+        poll_s=0.02,
+    )
+    await task
+    assert woke is True
+
+
+@pytest.mark.asyncio
+async def test_stale_stream_age_does_not_trip_when_rest_works(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(StreamHeartbeat, "age_ms", lambda self, now_ms: 10_000)
+    client = _SilentStreamPublic([_market()], _gap_books())
+    data_dir = tmp_path / "paper"
+    await run_paper(
+        client=client,
+        settings=_settings(),
+        project_root=tmp_path,
+        data_dir=data_dir,
+        once=False,
+        seconds=0.35,
+        poll_s=0.05,
+        watch_rotate_s=0,
+        list_window_s=10,
+    )
+    restored = StateStore(data_dir / "state.sqlite").restore()
+    assert restored.halted is False
+    assert restored.halt_reason == ""
+
+
+@pytest.mark.asyncio
+async def test_human_start_is_not_retripped_by_stale_stream_age(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(StreamHeartbeat, "age_ms", lambda self, now_ms: 10_000)
+    data_dir = tmp_path / "paper"
+    data_dir.mkdir()
+    store = StateStore(data_dir / "state.sqlite")
+    client = _SilentStreamPublic([_market()], _gap_books())
+
+    async def trip_then_start() -> None:
+        for _ in range(40):
+            await asyncio.sleep(0.02)
+            if store.restore().halted:
+                break
+        store.set_halted(True, reason="ws_stale")
+        apply_control(
+            data_dir, action="start", project_root=tmp_path, spawn=lambda *_: None
+        )
+        await asyncio.sleep(0.12)
+
+    clicker = asyncio.create_task(trip_then_start())
+    await run_paper(
+        client=client,
+        settings=_settings(),
+        project_root=tmp_path,
+        data_dir=data_dir,
+        once=False,
+        seconds=0.45,
+        poll_s=0.05,
+        watch_rotate_s=0,
+        list_window_s=10,
+    )
+    await clicker
+    restored = store.restore()
+    assert restored.halted is False
+    assert restored.halt_reason == ""

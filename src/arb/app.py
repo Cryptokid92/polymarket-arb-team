@@ -9,7 +9,7 @@ import json
 import re
 import threading
 import time
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator, Callable, Sequence
 from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
@@ -200,6 +200,63 @@ def stream_liveness_probe_due(*, age_ms: int, ws_stale_ms: int) -> bool:
     if ws_stale_ms <= 0:
         return False
     return age_ms >= max(1, (ws_stale_ms * 2) // 3)
+
+
+_PROGRESS_INT_FIELDS = (
+    "completed_pairs",
+    "naked_incidents",
+    "maker_quotes",
+    "intents",
+    "alerts",
+    "gaps",
+)
+
+
+def restore_progress_from_stats(path: Path, stats: PaperRunStats) -> None:
+    """Keep hour counters across a same-dir restart. Uniques stay in seen_markets."""
+    if not path.is_file():
+        return
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return
+    if not isinstance(payload, dict):
+        return
+    for field in _PROGRESS_INT_FIELDS:
+        raw = payload.get(field)
+        if raw is None:
+            continue
+        try:
+            value = int(raw)
+        except (TypeError, ValueError):
+            continue
+        if value < 0:
+            continue
+        setattr(stats, field, value)
+
+
+async def sleep_while_listing_paused(
+    leftover_s: float,
+    *,
+    should_resume: Callable[[], bool],
+    poll_s: float = 0.25,
+) -> bool:
+    """Wait leftover after ws_stale. True if human Start cleared the halt.
+
+    Listing may continue while intents are paused. A Start click must not
+    wait out the rest of the 60s window before considering again.
+    """
+    deadline = time.monotonic() + max(0.0, leftover_s)
+    if should_resume():
+        return True
+    while time.monotonic() < deadline:
+        if should_resume():
+            return True
+        step = min(poll_s, deadline - time.monotonic())
+        if step <= 0:
+            break
+        await asyncio.sleep(step)
+    return bool(should_resume())
 
 
 def run_pipeline(
@@ -902,6 +959,7 @@ async def run_paper(
     alerts_path = data_dir / "alerts.jsonl"
     stats_path = data_dir / "stats.json"
     stats = PaperRunStats()
+    restore_progress_from_stats(data_dir / "stats.json", stats)
     stats_io = threading.Lock()
 
     def persist_stats() -> None:
@@ -1137,9 +1195,12 @@ async def run_paper(
         now_ms = _now_ms()
         in_watch = pair.condition_id in watch_ids()
         portfolio.halted = not kill.allow_new_intents()
+        # Stream liveness is watch_silence + REST probe, not consider().
+        # Passing the stream-receive age here re-trips ws_stale after human
+        # Start (dead subscribe, REST still fine, age often > ws_stale_ms).
         kill.evaluate(
             daily_pnl=portfolio.daily_pnl,
-            ws_age_ms=heartbeat.age_ms(now_ms),
+            ws_age_ms=0,
             now_ms=now_ms,
         )
         portfolio.halted = not kill.allow_new_intents()
@@ -1469,8 +1530,11 @@ async def run_paper(
             if not kill.allow_new_intents():
                 if listing_may_continue():
                     leftover = min(deadline, stop_at) - time.monotonic()
-                    if leftover > 0:
-                        await asyncio.sleep(leftover)
+                    if await sleep_while_listing_paused(
+                        leftover,
+                        should_resume=kill.allow_new_intents,
+                    ):
+                        continue
                     return "swap" if time.monotonic() < deadline else "deadline"
                 return "halt"
             # subscribe ended; REST already probed; try again until swap
@@ -1534,9 +1598,11 @@ async def run_paper(
                 continue
             now_ms = _now_ms()
             if not kill.allow_new_intents():
+                # Human Start writes sqlite from the UI process. Do not
+                # re-trip ws_stale from a stale stream age on this tick.
                 kill.evaluate(
                     daily_pnl=portfolio.daily_pnl,
-                    ws_age_ms=heartbeat.age_ms(now_ms),
+                    ws_age_ms=0,
                     now_ms=now_ms,
                 )
                 continue

@@ -60,6 +60,14 @@ uv run python scripts/report_paper.py --data-dir data/paper-evidence-2026-08-28
 
 If that hour's tape is `non_positive`: stop. Do not loosen `min_edge`. Do not go live.
 
+## Start click vs `ws_stale` re-trip
+
+UI Start (`POST /api/control {action:start}`) clears sqlite halt when no `HALT` file is present. It does not spawn a second runner if the pid is alive. On the 28 Aug recorded hour the five maker completes happened in the first ~20s, then `ws_stale` latched. Start returned `ok` and immediately re-opened `halted=1 reason=ws_stale`.
+
+Cause: `consider()` and the already-halted `watch_silence` tick passed `heartbeat.age_ms` into `KillSwitch.evaluate`. Official subscribe often dies after list/`aclose` while REST books still work (`book_batch_failed=0`). Stream age then exceeds `ws_stale_ms` 3000, so the next consider/tick re-trips. `stats.json` `heartbeat_ms` is the last stats write, so the dashboard can look live while the kill switch is halted.
+
+Fix: `consider()` and the halted silence tick pass `ws_age_ms=0`. Liveness stays `watch_silence` + REST probe; `trip_dead_stream` only if that probe returns 0. After `ws_stale`, leftover window sleep wakes on human Start instead of waiting out the 60s hold. Same-dir restart keeps `completed_pairs` / maker-quote counters from `stats.json`. Caps unchanged. Task 12 stays dark.
+
 ## Go-live (human, later)
 
 Task 12 stays dark. Agents never create `ALLOW_LIVE`. One positive tape replay is not two separate honest paper hours on a live venue. This host is not a live venue.
