@@ -711,12 +711,8 @@ def render_html(summary: dict[str, Any]) -> str:
             f'<div class="hero-k">best walked edge</div>'
             f'<div class="hero-n">{_esc(best_edge if best_edge is not None else "—")}</div>'
             f"{_edge_meter_html(best_edge)}"
-            f'<p>best edge <strong>{_esc(best_edge)}</strong>'
-            f' · pair {_esc(closest.get("condition_id"))}'
-            f' · fillable {_esc(closest.get("fillable"))}'
-            f' · age {_esc(closest.get("book_age_ms"))} ms'
-            f' · in watch {_esc(closest.get("in_watch"))}</p>'
             f'<div class="hero-chips">'
+            f'<span>pair {_esc(closest.get("condition_id"))}</span>'
             f'<span>fillable {_esc(closest.get("fillable"))}</span>'
             f'<span>age {_esc(closest.get("book_age_ms"))} ms</span>'
             f'<span>watch {_esc(closest.get("in_watch"))}</span>'
@@ -850,8 +846,8 @@ def render_html(summary: dict[str, Any]) -> str:
     .metric.wide {{ grid-column: span 1; }}
     .main {{
       display: grid;
-      grid-template-columns: minmax(0, 1fr) minmax(0, 1.15fr);
-      grid-template-rows: auto minmax(0, 1fr);
+      grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr);
+      grid-template-rows: minmax(0, 1fr) auto;
       gap: 10px;
       min-height: 0;
     }}
@@ -859,18 +855,25 @@ def render_html(summary: dict[str, Any]) -> str:
       padding: 10px 12px; min-height: 0; overflow: auto;
       display: flex; flex-direction: column;
     }}
-    .panel-hist {{ grid-column: 2; grid-row: 1 / span 2; }}
+    .panel-watch {{ grid-column: 1; grid-row: 1 / span 2; overflow: hidden; }}
+    .panel-hist {{ grid-column: 2; grid-row: 1; }}
+    .panel-logs {{
+      grid-column: 2; grid-row: 2; max-height: 28vh;
+      display: grid; grid-template-columns: 1fr 1fr; gap: 8px 14px;
+    }}
+    .panel-logs h2 {{ margin-top: 6px; }}
+    .panel-logs > div > h2:first-child {{ margin-top: 0; }}
     .panel .bars {{ flex: 1; justify-content: space-evenly; }}
-    .hero-edge {{ padding: 4px 2px 0; }}
+    .hero-edge {{ padding: 2px 2px 0; flex: 0 0 auto; }}
     .watch-wrap {{ flex: 1; min-height: 0; display: flex; flex-direction: column; margin-top: 8px; }}
     .watch-list {{
-      flex: 1; min-height: 0; overflow: auto; display: flex; flex-direction: column; gap: 4px;
+      flex: 1; min-height: 0; overflow: auto; display: flex; flex-direction: column; gap: 3px;
     }}
     .watch-row {{
       display: grid; grid-template-columns: 36px minmax(0, 1fr) auto;
       gap: 8px; align-items: center;
       background: var(--panel-2); border: 1px solid var(--line); border-radius: 8px;
-      padding: 5px 8px; font-size: 12px;
+      padding: 3px 8px; font-size: 12px;
     }}
     .watch-row.pin {{ border-color: #8a6a1a; box-shadow: inset 3px 0 0 var(--amber); }}
     .watch-kind {{
@@ -891,8 +894,8 @@ def render_html(summary: dict[str, Any]) -> str:
     .watch-id {{ display: none; }}
     .hero-n {{
       font-family: "IBM Plex Mono", ui-monospace, Menlo, Consolas, monospace;
-      font-size: clamp(36px, 5vw, 64px); font-weight: 800; line-height: 1;
-      margin: 4px 0 8px;
+      font-size: clamp(28px, 3.6vw, 48px); font-weight: 800; line-height: 1;
+      margin: 2px 0 4px;
     }}
     .hero-edge.hot .hero-n {{ color: var(--green); }}
     .hero-edge.near .hero-n {{ color: var(--amber); }}
@@ -921,7 +924,7 @@ def render_html(summary: dict[str, Any]) -> str:
     .bar-fill.near {{ background: linear-gradient(90deg, #a16207, var(--amber)); box-shadow: 0 0 14px #f5c14a66; }}
     .bar-fill.hot {{ background: linear-gradient(90deg, #047857, var(--green)); box-shadow: 0 0 14px #34d39966; }}
     .bar-fill.thin {{ background: #64748b; }}
-    .meter {{ margin: 10px 0 12px; }}
+    .meter {{ margin: 6px 0 8px; }}
     .meter-track {{
       position: relative; height: 16px; border-radius: 99px;
       background: linear-gradient(90deg, #fb7185 0%, #fbbf24 60%, #34d399 85%, #5eead4 100%);
@@ -956,7 +959,10 @@ def render_html(summary: dict[str, Any]) -> str:
       body {{ overflow: auto; }}
       .board {{ height: auto; min-height: 100vh; }}
       .top, .main {{ grid-template-columns: 1fr; grid-template-rows: auto; }}
-      .panel-hist {{ grid-column: auto; grid-row: auto; }}
+      .panel-watch, .panel-hist, .panel-logs {{
+        grid-column: auto; grid-row: auto; max-height: none;
+      }}
+      .panel-logs {{ display: flex; }}
       .metrics {{ grid-template-columns: repeat(auto-fit, minmax(108px, 1fr)); }}
     }}
   </style>
@@ -1006,7 +1012,7 @@ def render_html(summary: dict[str, Any]) -> str:
       {_metric("runner", runner_alive)}
   </div>
   <div class="main">
-    <section class="panel">
+    <section class="panel panel-watch">
       <h2>Closest book this hour</h2>
       {closest_html}
       <div class="watch-wrap">
@@ -1019,7 +1025,8 @@ def render_html(summary: dict[str, Any]) -> str:
       <p class="empty">considers {_esc(considers)} · hunt stays silent below min_edge 0.01</p>
       {_hist_bars_html(histogram)}
     </section>
-    <section class="panel">
+    <section class="panel panel-logs">
+      <div>
       <h2>Recent near-misses</h2>
       {_rows_html(summary.get("recent_nearmiss") or [], [
         ("raw_edge", "raw_edge"),
@@ -1038,8 +1045,8 @@ def render_html(summary: dict[str, Any]) -> str:
         ("outcome", "outcome"),
         ("condition_id", "condition_id"),
       ])}
-    </section>
-    <section class="panel">
+      </div>
+      <div>
       <h2>Reject reasons</h2>
       {_reason_bars_html(reasons)}
       <h2>Recent gaps</h2>
@@ -1067,6 +1074,7 @@ def render_html(summary: dict[str, Any]) -> str:
         ("size", "size"),
         ("expected_net_edge", "expected_net_edge"),
       ])}
+      </div>
     </section>
   </div>
   <footer>Paper $500 bankroll is not real money. Binds 127.0.0.1. Auto-refresh 2s. No live path.</footer>

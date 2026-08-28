@@ -540,6 +540,11 @@ def test_html_uses_fullscreen_board_and_histogram_bars(tmp_path: Path) -> None:
     assert "Will it rain?" in page
     assert "c-hot" in page
     assert "c-rot" in page
+    assert 'class="watch-kind">pin' in page
+    assert 'class="watch-kind">rot' in page
+    assert "panel-watch" in page
+    assert "grid-row: 1 / span 2" in page
+    assert "panel-logs" in page
     assert 'class="board"' in page
     assert "100vh" in page
     assert "data-bucket=" in page
