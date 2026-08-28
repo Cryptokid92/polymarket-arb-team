@@ -27,20 +27,21 @@ from arb.state import StateStore
 
 
 def test_rotate_defaults_match_watch_slice() -> None:
-    assert ROTATE_DEFAULT_S == WATCH_ROTATE_S == 10
-    assert ROTATE_MIN_S == 10
+    assert ROTATE_DEFAULT_S == WATCH_ROTATE_S == 1
+    assert ROTATE_MIN_S == 1
     assert ROTATE_MAX_S == 120
     assert WATCH_PAIRS == 40
 
 
-def test_clamp_rotate_s_is_10_to_120() -> None:
+def test_clamp_rotate_s_is_1_to_120() -> None:
+    assert clamp_rotate_s(1) == 1
     assert clamp_rotate_s(10) == 10
     assert clamp_rotate_s(120) == 120
     assert clamp_rotate_s(90) == 90
-    assert clamp_rotate_s(9) == 10
+    assert clamp_rotate_s(0) == 1
     assert clamp_rotate_s(121) == 120
     assert clamp_rotate_s("45") == 45
-    assert clamp_rotate_s("nope") == 10
+    assert clamp_rotate_s("nope") == 1
 
 
 def test_slider_write_persists_rotate_s(tmp_path: Path) -> None:
@@ -67,7 +68,7 @@ def test_slider_write_does_not_loosen_caps() -> None:
     assert fields["max_daily_loss"].default == Decimal("50")
     assert fields["max_open_pairs"].default == 3
     assert fields["paper_bankroll"].default == Decimal("500")
-    assert WATCH_ROTATE_S == 10
+    assert WATCH_ROTATE_S == 1
     assert WATCH_PAIRS == 40
 
 
@@ -135,6 +136,9 @@ def test_stop_and_spawn_source_stay_paper_only() -> None:
     assert "ARB_MODE" in inspect.getsource(default_spawn)
     assert "paper_run.py" in inspect.getsource(default_spawn)
     assert "--place-orders" not in inspect.getsource(default_spawn)
+    assert "--all-markets" in inspect.getsource(default_spawn)
+    assert "--list-window-s" in inspect.getsource(default_spawn)
+    assert '"60"' in inspect.getsource(default_spawn)
 
 
 def test_start_resumes_ws_stale_when_no_halt_file(tmp_path: Path) -> None:

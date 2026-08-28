@@ -33,6 +33,7 @@ from arb.paper_control import (
 from arb.paper_ledger import PaperFillResult, PaperLedger
 from arb.recorder import BookRecorder, book_to_event
 from arb.risk import MarketFlags, Portfolio, approve
+from arb.seen import load_seen_markets
 from arb.state import StateStore
 from arb.watch import hot_watch_slice, watch_board_rows
 
@@ -56,8 +57,13 @@ WATCH_PAIRS = 40
 # Pin this many highest-edge pairs inside WATCH_PAIRS. Do not raise the cap.
 PIN_HOT_PAIRS = 8
 # Rotate the watch window so the rest of the universe is visited during
-# a 1-hour run. 90s * 40 pairs ≈ 1600 pair-looks/hour.
-WATCH_ROTATE_S = 10
+# a 1-hour run. 1s * ~32 rotating pairs ≈ one rest-cycle per ~48s on a
+# 1546-pair window. Do not raise WATCH_PAIRS.
+WATCH_ROTATE_S = 1
+# Dwell on one 5000-market window this long, then swap if the next
+# window is listed. Listing runs first (no websocket) so 50 official
+# pages can finish inside the minute. Do not raise LIST_SAFETY_CAP.
+LIST_WINDOW_S = 60
 _SHORT_WINDOW = re.compile(
     r"(?:^|[^0-9])(?:5|15)(?:\s|-)?(?:m(?:in(?:ute)?s?)?)\b",
     re.IGNORECASE,
@@ -121,6 +127,12 @@ class PaperRunStats:
     list_cursor: str | None = None
     list_wraps: int = 0
     list_next_queued: bool = False
+    list_window_s: int = LIST_WINDOW_S
+    list_hold_s: float = 0
+    listed_unique: int = 0
+    universe_unique: int = 0
+    walked_unique: int = 0
+    list_empty_windows: int = 0
 
 
 class StreamHeartbeat:
@@ -142,6 +154,36 @@ class StreamHeartbeat:
         if self.last_receive_ms is None:
             return self._NEVER_RECEIVED_AGE_MS
         return max(0, now_ms - self.last_receive_ms)
+
+
+def list_cycle_may_continue(
+    *,
+    halted: bool,
+    halt_reason: str,
+    halt_file: bool,
+) -> bool:
+    """ws_stale blocks new paper intents, not the next 5000-market list.
+
+    daily_loss, hedge_incidents, and a HALT file still stop listing.
+    """
+    if halt_file:
+        return False
+    if not halted:
+        return True
+    return halt_reason == "ws_stale"
+
+
+async def _abandon_task(task: asyncio.Task[Any], timeout_s: float = 0.4) -> None:
+    """Cancel a task. Do not hang the 60s list swap on subscribe aclose."""
+    if task.done():
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            task.result()
+        return
+    task.cancel()
+    try:
+        await asyncio.wait_for(task, timeout=timeout_s)
+    except (asyncio.TimeoutError, asyncio.CancelledError, Exception):
+        return
 
 
 def stream_liveness_probe_due(*, age_ms: int, ws_stale_ms: int) -> bool:
@@ -404,6 +446,12 @@ def write_paper_stats(
         "list_cursor": stats.list_cursor,
         "list_wraps": stats.list_wraps,
         "list_next_queued": stats.list_next_queued,
+        "list_window_s": stats.list_window_s,
+        "list_hold_s": stats.list_hold_s,
+        "listed_unique": stats.listed_unique,
+        "universe_unique": stats.universe_unique,
+        "walked_unique": stats.walked_unique,
+        "list_empty_windows": stats.list_empty_windows,
         "heartbeat_ms": _now_ms() if now_ms is None else now_ms,
     }
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -457,6 +505,7 @@ async def _iter_listed_markets(
     max_markets: int,
     *,
     after_cursor: str | None = None,
+    on_progress: Any = None,
 ) -> ListedWindow:
     """Walk official list_markets pages until exhausted, the user cap, or the safety ceiling.
 
@@ -499,7 +548,11 @@ async def _iter_listed_markets(
                 break
             for market in page_items:
                 if _take(market):
+                    if on_progress is not None:
+                        on_progress(len(items))
                     return ListedWindow(items, next_cursor)
+            if on_progress is not None:
+                on_progress(len(items))
         return ListedWindow(items, next_cursor)
 
     iter_items = getattr(listed, "iter_items", None)
@@ -507,6 +560,10 @@ async def _iter_listed_markets(
         async for market in iter_items():
             if _take(market):
                 break
+            if on_progress is not None and len(items) % LIST_PAGE_SIZE == 0:
+                on_progress(len(items))
+        if on_progress is not None:
+            on_progress(len(items))
         return ListedWindow(items, None)
     if isinstance(listed, list):
         return ListedWindow(listed[:limit], None)
@@ -789,6 +846,7 @@ async def run_paper(
     book_batch_size: int = BOOK_BATCH_SIZE,
     watch_pairs: int = WATCH_PAIRS,
     watch_rotate_s: float = WATCH_ROTATE_S,
+    list_window_s: float = LIST_WINDOW_S,
     honest: bool = True,
     p_miss: Decimal = Decimal("0.3"),
     rng_seed: int = 0,
@@ -806,6 +864,7 @@ async def run_paper(
     alerts_path = data_dir / "alerts.jsonl"
     stats_path = data_dir / "stats.json"
     stats = PaperRunStats()
+    stats.list_window_s = max(0, int(list_window_s))
     store = BookStore()
     heartbeat = StreamHeartbeat()
     broker = PaperBroker(log_path=intents_path)
@@ -816,6 +875,16 @@ async def run_paper(
         settings=settings,
     )
     restored = state.restore()
+    if (
+        restored.halted
+        and (restored.halt_reason or "") == "ws_stale"
+        and not (project_root / "HALT").is_file()
+        and not (Path(data_dir) / "HALT").is_file()
+    ):
+        # New process, new subscribe. Not evaluate() auto-resume.
+        # daily_loss / HALT file stay halted.
+        state.set_halted(False)
+        restored = state.restore()
     starting_bankroll = (
         restored.bankroll
         if restored.bankroll is not None
@@ -845,6 +914,18 @@ async def run_paper(
     saved_cursor, saved_window, saved_wraps = read_list_cursor_state(data_dir)
     stats.list_window = saved_window
     stats.list_wraps = saved_wraps
+    seen = load_seen_markets(data_dir)
+    seen.apply_to(stats)
+    last_saved_walked = seen.walked_unique
+
+    def persist_seen(*, force: bool = False) -> None:
+        nonlocal last_saved_walked
+        seen.apply_to(stats)
+        grew = seen.walked_unique >= last_saved_walked + 25
+        if force or grew:
+            seen.save(data_dir)
+            last_saved_walked = seen.walked_unique
+
     pairs: list[UniversePair] = []
     by_token: dict[str, UniversePair] = {}
     watch_offset = 0
@@ -852,19 +933,24 @@ async def run_paper(
     def ingest_markets(markets: list[Any]) -> list[UniversePair]:
         kept: list[UniversePair] = []
         for market in markets:
+            cid = str(getattr(market, "condition_id", "") or "")
+            seen.note_listed(cid)
             reason = reject_universe(market)
             if reason is not None:
                 _append_jsonl(
                     rejects_path,
                     {
                         "ts_ms": _now_ms(),
-                        "condition_id": str(getattr(market, "condition_id", "") or ""),
+                        "condition_id": cid,
                         "reason": reason,
                     },
                 )
                 _bump(stats, reason)
                 continue
-            kept.append(universe_pair(market))
+            pair = universe_pair(market)
+            seen.note_universe(pair.condition_id)
+            kept.append(pair)
+        persist_seen(force=True)
         return kept
 
     def replace_pairs(new_pairs: list[UniversePair]) -> None:
@@ -902,10 +988,15 @@ async def run_paper(
     stats.markets_listed = len(listed_window.markets)
     replace_pairs(ingest_markets(listed_window.markets))
     stats.universe = len(pairs)
+    if not pairs:
+        stats.list_empty_windows += 1
     persist_list_cursor(listed_window.next_cursor)
     batch_size = max(1, int(book_batch_size))
     watch_n = max(1, int(watch_pairs))
     rotate_s = float(watch_rotate_s)
+    hold_s = max(0.0, float(list_window_s))
+    stats.list_window_s = int(hold_s)
+    window_until = 0.0
     watch_offset = 0
 
     def current_watch_pairs() -> list[UniversePair]:
@@ -926,6 +1017,8 @@ async def run_paper(
         return pinned_n
 
     def refresh_watch_board() -> None:
+        if window_until > 0:
+            stats.list_hold_s = max(0.0, window_until - time.monotonic())
         watched = current_watch_pairs()
         stats.watching = len(watched)
         stats.watch = watch_board_rows(
@@ -993,6 +1086,9 @@ async def run_paper(
         no = store.get(pair.no_token_id)
         if yes is None or no is None:
             return
+        if seen.note_walked(pair.condition_id):
+            seen.append_walked(data_dir, pair.condition_id)
+        persist_seen()
         now_ms = _now_ms()
         in_watch = pair.condition_id in watch_ids()
         portfolio.halted = not kill.allow_new_intents()
@@ -1154,10 +1250,12 @@ async def run_paper(
             clear_pid(data_dir)
             raise
 
-    if once or not all_token_ids:
+    catalog_done = listed_window.next_cursor is None
+    if once or (not all_token_ids and catalog_done):
         await expire_rests(force_timeout=True)
         _sync_tracker_stats(stats, tracker)
         refresh_watch_board()
+        persist_seen(force=True)
         write_paper_stats(stats_path, stats)
         if recorder is not None:
             recorder.close()
@@ -1179,6 +1277,15 @@ async def run_paper(
             now_ms=now_ms,
         )
         portfolio.halted = not kill.allow_new_intents()
+
+    def listing_may_continue() -> bool:
+        halt_file = (project_root / "HALT").is_file() or (data_dir / "HALT").is_file()
+        restored = kill.state.restore()
+        return list_cycle_may_continue(
+            halted=restored.halted,
+            halt_reason=restored.halt_reason or "",
+            halt_file=halt_file,
+        )
 
     async def handle_update(update: Any) -> None:
         now_ms = _now_ms()
@@ -1219,6 +1326,8 @@ async def run_paper(
             await consider(pair)
 
     async def rest_probe_watch() -> int:
+        if not current_watch_tokens():
+            return 1
         probe_ok = 0
         probe_timeout_s = max(0.05, settings.ws_stale_ms / 1000)
 
@@ -1245,6 +1354,8 @@ async def run_paper(
 
     async def consume_slice() -> None:
         tokens = current_watch_tokens()
+        if not tokens:
+            return
         try:
             async for update in _updates(
                 client,
@@ -1259,43 +1370,42 @@ async def run_paper(
         except asyncio.CancelledError:
             raise
         except PublicApiError:
-            trip_dead_stream()
+            # Official subscribe often dies after a planned list or aclose
+            # ("WebSocket heartbeat stale; closing"). Probe REST first.
+            if await rest_probe_watch() == 0:
+                trip_dead_stream()
             return
         if time.monotonic() >= deadline:
             return
         if await rest_probe_watch() == 0:
             trip_dead_stream()
 
-    async def consume(prefetch: asyncio.Task[Any] | None = None) -> str:
+    async def consume_until(stop_at: float) -> str:
         while time.monotonic() < deadline:
-            if prefetch is not None and prefetch.done():
+            now = time.monotonic()
+            if now >= stop_at:
                 return "swap"
-            rotated.clear()
+            # Do not cancel subscribe on every 1s rotate. Official aclose
+            # prints heartbeat-stale and trips ws_stale while REST is fine.
+            # REST rotate_watch walks the rotating slice.
+            remaining = min(deadline, stop_at) - now
             slice_task = asyncio.create_task(consume_slice())
-            rotate_wait = asyncio.create_task(rotated.wait())
-            remaining = deadline - time.monotonic()
-            wait_for = {slice_task, rotate_wait}
-            if prefetch is not None:
-                wait_for.add(prefetch)
-            done, pending = await asyncio.wait(
-                wait_for,
-                timeout=max(0.0, remaining),
-                return_when=asyncio.FIRST_COMPLETED,
-            )
-            for task in pending:
-                if prefetch is not None and task is prefetch:
-                    continue
-                task.cancel()
-                with contextlib.suppress(asyncio.CancelledError):
-                    await task
-            if prefetch is not None and prefetch in done:
-                return "swap"
-            if slice_task in done and not slice_task.cancelled():
-                if not kill.allow_new_intents():
-                    return "halt"
-                continue
-            if not done:
-                return "deadline"
+            try:
+                await asyncio.wait_for(slice_task, timeout=max(0.01, remaining))
+            except asyncio.TimeoutError:
+                await _abandon_task(slice_task)
+                return "deadline" if time.monotonic() >= deadline else "swap"
+            except asyncio.CancelledError:
+                await _abandon_task(slice_task)
+                raise
+            if not kill.allow_new_intents():
+                if listing_may_continue():
+                    leftover = min(deadline, stop_at) - time.monotonic()
+                    if leftover > 0:
+                        await asyncio.sleep(leftover)
+                    return "swap" if time.monotonic() < deadline else "deadline"
+                return "halt"
+            # subscribe ended; REST already probed; try again until swap
         return "deadline"
 
     async def rotate_watch() -> None:
@@ -1333,14 +1443,17 @@ async def run_paper(
             rotate_n = max(1, watch_n - pinned_n)
             watch_offset = (watch_offset + rotate_n) % rest_n
             next_tokens = current_watch_tokens()
-            await fetch_book_batches(
-                client,
-                next_tokens,
-                batch_size=batch_size,
-                on_ok=apply_book_batch,
-                on_fail=log_batch_fail,
-                raise_if_all_fail=False,
-            )
+            # 1s rotate REST starves official list_markets of the next
+            # 5000. Skip those fetches while the next window is listing.
+            if not stats.list_next_queued:
+                await fetch_book_batches(
+                    client,
+                    next_tokens,
+                    batch_size=batch_size,
+                    on_ok=apply_book_batch,
+                    on_fail=log_batch_fail,
+                    raise_if_all_fail=False,
+                )
             refresh_watch_board()
             write_paper_stats(stats_path, stats)
             rotated.set()
@@ -1349,6 +1462,8 @@ async def run_paper(
         interval_s = max(0.02, min(poll_s, settings.ws_stale_ms / 1000))
         while True:
             await asyncio.sleep(interval_s)
+            if not current_watch_tokens():
+                continue
             now_ms = _now_ms()
             if not kill.allow_new_intents():
                 kill.evaluate(
@@ -1370,99 +1485,136 @@ async def run_paper(
                 now_ms=now_ms,
             )
 
+    def listing_progress(n: int) -> None:
+        if window_until > 0:
+            stats.list_hold_s = max(0.0, window_until - time.monotonic())
+        write_paper_stats(stats_path, stats)
+
     async def prepare_next_window(after_cursor: str | None) -> Any:
         try:
             window = await _iter_listed_markets(
-                client, max_markets, after_cursor=after_cursor
+                client,
+                max_markets,
+                after_cursor=after_cursor,
+                on_progress=listing_progress,
             )
         except PublicApiError:
             return None
         new_pairs = ingest_markets(window.markets)
-        tokens = pair_token_ids(new_pairs)
-        if tokens:
-            await fetch_book_batches(
-                client,
-                tokens,
-                batch_size=batch_size,
-                on_ok=make_apply(new_pairs),
-                on_fail=log_batch_fail,
-                raise_if_all_fail=False,
-            )
+        # List+ingest only. A full-universe REST snapshot here never
+        # finished under 1s rotate, so unique walked froze on one window.
         return window, new_pairs
 
-    async def run_watch(prefetch: asyncio.Task[Any] | None) -> str:
+    async def run_watch_until(stop_at: float) -> str:
         watch = asyncio.create_task(watch_silence())
         rotator = asyncio.create_task(rotate_watch())
+        consume = asyncio.create_task(consume_until(stop_at))
+        remaining = min(deadline, stop_at) - time.monotonic()
+        timer = asyncio.create_task(asyncio.sleep(max(0.0, remaining)))
         reason = "deadline"
         try:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                return "deadline"
-            try:
-                reason = await asyncio.wait_for(
-                    consume(prefetch), timeout=remaining
-                )
-            except asyncio.TimeoutError:
+            await asyncio.wait(
+                {consume, timer},
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if consume.done() and not consume.cancelled():
+                try:
+                    reason = consume.result()
+                except Exception:
+                    reason = (
+                        "deadline" if time.monotonic() >= deadline else "swap"
+                    )
+            elif time.monotonic() >= deadline:
                 reason = "deadline"
+            else:
+                reason = "swap"
             return reason
         finally:
-            rotator.cancel()
-            watch.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await rotator
-            with contextlib.suppress(asyncio.CancelledError):
-                await watch
+            await _abandon_task(timer)
+            await _abandon_task(consume)
+            await _abandon_task(rotator)
+            await _abandon_task(watch)
 
     next_after = listed_window.next_cursor
+    window_started = time.monotonic()
+    window_until = window_started + hold_s if hold_s > 0 else window_started
     try:
         while time.monotonic() < deadline:
             refresh_watch_board()
-            prefetch = None
-            if next_after is not None:
-                stats.list_next_queued = True
-                write_paper_stats(stats_path, stats)
-                prefetch = asyncio.create_task(prepare_next_window(next_after))
-            else:
-                stats.list_next_queued = False
-                write_paper_stats(stats_path, stats)
-            reason = await run_watch(prefetch)
-            prepared = None
-            if prefetch is not None:
-                if prefetch.done() and not prefetch.cancelled():
-                    with contextlib.suppress(Exception):
-                        prepared = prefetch.result()
-                else:
-                    prefetch.cancel()
-                    with contextlib.suppress(asyncio.CancelledError, Exception):
-                        await prefetch
-            if (
-                reason == "swap"
-                and prepared is not None
-                and time.monotonic() < deadline
-            ):
-                window, new_pairs = prepared
-                new_ids = {pair.condition_id for pair in new_pairs}
-                old_ids = {pair.condition_id for pair in pairs}
-                if new_ids == old_ids and window.next_cursor is None:
-                    break
-                if next_after is None:
-                    stats.list_wraps += 1
-                stats.list_window += 1
-                replace_pairs(new_pairs)
-                stats.markets_listed = len(window.markets)
-                stats.universe = len(pairs)
-                persist_list_cursor(window.next_cursor)
-                next_after = window.next_cursor
-                stats.list_next_queued = False
-                continue
-            now_ms = _now_ms()
-            clean_end = reason == "deadline" or time.monotonic() >= deadline
-            kill.evaluate(
-                daily_pnl=portfolio.daily_pnl,
-                ws_age_ms=0 if clean_end else heartbeat.age_ms(now_ms),
-                now_ms=now_ms,
+            window_until = (
+                time.monotonic() if hold_s <= 0 else window_started + hold_s
             )
-            break
+            stats.list_next_queued = True
+            stats.list_hold_s = max(0.0, window_until - time.monotonic())
+            write_paper_stats(stats_path, stats)
+            # List the next 5000 while the websocket is down so official
+            # pages are not starved by subscribe / 1s rotate REST.
+            # after_cursor=None wraps to the start of the catalog.
+            prepared = await prepare_next_window(next_after)
+            stats.list_next_queued = False
+            stop_at = (
+                time.monotonic()
+                if hold_s <= 0 or not pairs
+                else window_until
+            )
+            stats.list_hold_s = max(0.0, stop_at - time.monotonic())
+            write_paper_stats(stats_path, stats)
+            reason = await run_watch_until(stop_at)
+            stats.list_hold_s = 0
+            if time.monotonic() >= deadline or reason == "deadline":
+                now_ms = _now_ms()
+                kill.evaluate(
+                    daily_pnl=portfolio.daily_pnl,
+                    ws_age_ms=0,
+                    now_ms=now_ms,
+                )
+                break
+            if reason == "halt" and not listing_may_continue():
+                now_ms = _now_ms()
+                kill.evaluate(
+                    daily_pnl=portfolio.daily_pnl,
+                    ws_age_ms=heartbeat.age_ms(now_ms),
+                    now_ms=now_ms,
+                )
+                break
+            if prepared is None:
+                break
+            window, new_pairs = prepared
+            new_ids = {pair.condition_id for pair in new_pairs}
+            old_ids = {pair.condition_id for pair in pairs}
+            if new_ids == old_ids and window.next_cursor is None:
+                if not new_pairs:
+                    stats.list_empty_windows += 1
+                    stats.markets_listed = len(window.markets)
+                    persist_list_cursor(window.next_cursor)
+                    persist_seen(force=True)
+                    refresh_watch_board()
+                    write_paper_stats(stats_path, stats)
+                break
+            if next_after is None:
+                stats.list_wraps += 1
+            stats.list_window += 1
+            stats.markets_listed = len(window.markets)
+            persist_list_cursor(window.next_cursor)
+            next_after = window.next_cursor
+            stats.list_next_queued = False
+            persist_seen(force=True)
+            if not new_pairs:
+                # All filtered (neg-risk / delay). Keep the last tradeable
+                # watch slice and list the next 5000 immediately.
+                stats.list_empty_windows += 1
+                refresh_watch_board()
+                write_paper_stats(stats_path, stats)
+                continue
+            replace_pairs(new_pairs)
+            stats.universe = len(pairs)
+            write_paper_stats(stats_path, stats)
+            await snapshot_current(raise_if_all_fail=False)
+            window_started = time.monotonic()
+            window_until = (
+                window_started + hold_s if hold_s > 0 else window_started
+            )
+            continue
     finally:
         await expire_rests(force_timeout=True)
         if recorder is not None:
@@ -1470,5 +1622,6 @@ async def run_paper(
         clear_pid(data_dir)
     _sync_tracker_stats(stats, tracker)
     stats.list_next_queued = False
+    persist_seen(force=True)
     write_paper_stats(stats_path, stats)
     return stats

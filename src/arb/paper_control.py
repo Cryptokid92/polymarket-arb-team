@@ -19,10 +19,10 @@ from arb.state import StateStore
 
 CONTROL_FILENAME = "control.json"
 PID_FILENAME = "paper_run.pid"
-ROTATE_MIN_S = 10
+ROTATE_MIN_S = 1
 ROTATE_MAX_S = 120
 # Same default as arb.app.WATCH_ROTATE_S. Do not import app (cycle).
-ROTATE_DEFAULT_S = 10
+ROTATE_DEFAULT_S = 1
 
 SpawnFn = Callable[[Path, Path], None]
 
@@ -137,6 +137,11 @@ def default_spawn(project_root: Path, data_dir: Path) -> None:
             str(data_dir),
             "--seconds",
             "3600",
+            "--all-markets",
+            "--watch-rotate-s",
+            "1",
+            "--list-window-s",
+            "60",
         ],
         cwd=str(project_root),
         env=env,

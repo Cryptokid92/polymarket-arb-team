@@ -60,7 +60,7 @@ def test_summarize_fixture_counts(tmp_path: Path) -> None:
     assert summary["paper"]["bankroll"] == "500"
     assert summary["paper"]["daily_pnl"] == "0"
     assert summary["recent_fills"] == []
-    assert summary["control"]["rotate_s"] == 10
+    assert summary["control"]["rotate_s"] == 1
     assert summary["reject_reasons"] == {
         "neg_risk": 1,
         "short_crypto_window": 1,
@@ -221,7 +221,8 @@ def test_halt_from_readonly_sqlite(tmp_path: Path) -> None:
     assert summary["halt"]["halt_reason"] == "ws_stale"
     page = ui.render_html(summary)
     assert "ws_stale" in page
-    assert "stream or REST probe failed" in page
+    assert "pauses new paper intents" in page
+    assert "Listing the next 5000 still continues" in page
     assert "not daily loss" in page
 
 
@@ -326,6 +327,12 @@ def test_write_paper_stats_has_no_account_fields(tmp_path: Path) -> None:
         "list_cursor": None,
         "list_wraps": 0,
         "list_next_queued": False,
+        "list_window_s": 60,
+        "list_hold_s": 0,
+        "listed_unique": 0,
+        "universe_unique": 0,
+        "walked_unique": 0,
+        "list_empty_windows": 0,
         "heartbeat_ms": 1_700_000_000_123,
     }
     blob = path.read_text(encoding="utf-8")
@@ -514,6 +521,9 @@ def test_html_uses_fullscreen_board_and_histogram_bars(tmp_path: Path) -> None:
             universe=12,
             watching=40,
             nearmiss_considers=9,
+            listed_unique=9000,
+            universe_unique=2100,
+            walked_unique=800,
             best_edge=Decimal("-0.001"),
             closest_condition_id="c-near",
             closest_fillable=Decimal("5"),
@@ -544,6 +554,16 @@ def test_html_uses_fullscreen_board_and_histogram_bars(tmp_path: Path) -> None:
     page = ui.render_html(summary)
     assert "Watching now" in page
     assert "list window" in page
+    assert "unique listed" in page
+    assert "unique walked" in page
+    assert "next 5000 every" in page
+    assert "next 5000 in" in page
+    assert "empty windows" in page
+    assert "Different markets gone through" in page
+    assert "9000" in page
+    assert "800" in page
+    assert summary["paper"]["listed_unique"] == 9000
+    assert summary["paper"]["walked_unique"] == 800
     assert "Will it rain?" in page
     assert "c-hot" in page
     assert "c-rot" in page
@@ -560,6 +580,64 @@ def test_html_uses_fullscreen_board_and_histogram_bars(tmp_path: Path) -> None:
     assert "Closest book this hour" in page
     assert "not halted" in page
     assert "HALTED" not in page
+
+
+def test_coverage_html_uses_unique_listed_as_scale() -> None:
+    ui = _load_script()
+    html = ui._coverage_html(
+        listed_unique=100,
+        universe_unique=40,
+        walked_unique=10,
+        window_listed=50,
+    )
+    assert "Different markets gone through" in html
+    assert 'data-bucket="listed_unique"' in html
+    assert 'data-bucket="walked_unique"' in html
+    assert ">100<" in html or ">100</span>" in html
+    empty = ui._coverage_html(
+        listed_unique=0, universe_unique=0, walked_unique=0, window_listed=0
+    )
+    assert "No unique markets yet" in empty
+
+
+def test_watch_html_explains_filtered_and_listing_states() -> None:
+    ui = _load_script()
+    listing = ui._watch_html([], listing=True)
+    assert "Listing the next 5000" in listing
+    assert "has not subscribed" not in listing
+    filtered = ui._watch_html(
+        [], listing=False, empty_windows=3, window_listed=5000, universe=0
+    )
+    assert "all filtered" in filtered
+    assert "Skipped 3 empty windows" in filtered
+    waiting = ui._watch_html([])
+    assert "Waiting on the next 5000" in waiting
+    assert "has not subscribed" not in waiting
+
+
+def test_list_note_explains_walked_plateau_while_next_window_lists(
+    tmp_path: Path,
+) -> None:
+    ui = _load_script()
+    paper = tmp_path / "paper"
+    paper.mkdir()
+    write_paper_stats(
+        paper / "stats.json",
+        PaperRunStats(
+            markets_listed=5000,
+            universe=925,
+            listed_unique=11896,
+            universe_unique=925,
+            walked_unique=944,
+            list_window=3,
+            list_next_queued=True,
+        ),
+        now_ms=1_700_000_000_500,
+    )
+    summary = ui.summarize_dashboard(paper, project_root=tmp_path, now_ms=1_700_000_000_500)
+    page = ui.render_html(summary)
+    assert "waiting on next list pages" in page
+    assert "944" in page
 
 
 def test_http_control_stop_and_slider(tmp_path: Path) -> None:

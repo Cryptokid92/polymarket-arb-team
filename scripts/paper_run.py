@@ -5,7 +5,7 @@ Usage:
   uv run python scripts/paper_run.py --seconds 3600
   uv run python scripts/paper_run.py --all-markets --seconds 3600
   uv run python scripts/paper_run.py --once --data-dir /tmp/paper
-  uv run python scripts/paper_run.py --all-markets --book-batch-size 50 --watch-pairs 40 --watch-rotate-s 10
+  uv run python scripts/paper_run.py --all-markets --book-batch-size 50 --watch-pairs 40 --watch-rotate-s 1
 """
 
 from __future__ import annotations
@@ -23,6 +23,7 @@ from arb.app import (
     BOOK_BATCH_SIZE,
     LIST_PAGE_SIZE,
     LIST_SAFETY_CAP,
+    LIST_WINDOW_S,
     WATCH_PAIRS,
     WATCH_ROTATE_S,
     run_paper,
@@ -72,7 +73,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "List open markets in official-cursor windows (same as --max-markets 0). "
             f"Window size {LIST_SAFETY_CAP}. Universe filter still applies. "
             f"REST books are batched ({BOOK_BATCH_SIZE} token ids). "
-            f"Watch first {WATCH_PAIRS} pairs; rotate every {WATCH_ROTATE_S}s."
+            f"Watch first {WATCH_PAIRS} pairs; rotate every {WATCH_ROTATE_S}s. "
+            f"Swap listed windows every {LIST_WINDOW_S}s."
         ),
     )
     parser.add_argument(
@@ -100,6 +102,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help=(
             f"Seconds between watch-slice rotations (default {WATCH_ROTATE_S}). "
             "0 disables rotation."
+        ),
+    )
+    parser.add_argument(
+        "--list-window-s",
+        type=float,
+        default=LIST_WINDOW_S,
+        help=(
+            f"Seconds to stay on one 5000-market window before swapping "
+            f"(default {LIST_WINDOW_S}). 0 swaps as soon as the next window "
+            "is listed. Does not raise LIST_SAFETY_CAP."
         ),
     )
     parser.add_argument(
@@ -167,6 +179,7 @@ async def _run(args: argparse.Namespace, settings, project_root: Path) -> int:
             book_batch_size=args.book_batch_size,
             watch_pairs=args.watch_pairs,
             watch_rotate_s=args.watch_rotate_s,
+            list_window_s=args.list_window_s,
             record_books=bool(args.record_books),
         )
     except Exception as exc:
