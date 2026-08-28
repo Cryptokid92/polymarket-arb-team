@@ -1,4 +1,4 @@
-"""Hot watch pin + rotate. Does not raise WATCH_PAIRS."""
+"""Hot watch pin + rotate. PIN_HOT_PAIRS stays inside WATCH_PAIRS."""
 
 from __future__ import annotations
 

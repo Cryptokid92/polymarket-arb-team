@@ -242,7 +242,7 @@ def test_nearmiss_does_not_loosen_caps() -> None:
     assert fields["max_notional_per_trade"].default == Decimal("25")
     assert LIST_SAFETY_CAP == 5000
     assert BOOK_BATCH_SIZE == 50
-    assert WATCH_PAIRS == 40
+    assert WATCH_PAIRS == 100
     assert PIN_HOT_PAIRS <= WATCH_PAIRS
     assert PIN_HOT_PAIRS == 8
 

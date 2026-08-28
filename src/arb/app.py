@@ -53,14 +53,14 @@ BOOK_BATCH_SIZE = 50
 # In-flight get_order_books calls. Do not raise BOOK_BATCH_SIZE.
 BOOK_FETCH_CONCURRENCY = 4
 LIST_CURSOR_FILENAME = "list_cursor.json"
-# Live subscribe/poll window. 40 pairs = 80 token ids. Do not subscribe
+# Live subscribe/poll window. 100 pairs = 200 token ids. Do not subscribe
 # all ~1540 universe pairs at once.
-WATCH_PAIRS = 40
-# Pin this many highest-edge pairs inside WATCH_PAIRS. Do not raise the cap.
+WATCH_PAIRS = 100
+# Pin this many highest-edge pairs inside WATCH_PAIRS. Do not raise the pin.
 PIN_HOT_PAIRS = 8
 # Rotate the watch window so the rest of the universe is visited during
-# a 1-hour run. 1s * ~32 rotating pairs ≈ one rest-cycle per ~48s on a
-# 1546-pair window. Do not raise WATCH_PAIRS.
+# a 1-hour run. 1s * ~92 rotating pairs ≈ one rest-cycle per ~17s on a
+# 1546-pair window.
 WATCH_ROTATE_S = 1
 # Dwell on one 5000-market window this long, then swap if the next
 # window is listed. Listing runs first (no websocket) so 50 official
@@ -1458,7 +1458,6 @@ async def run_paper(
         if not current_watch_tokens():
             return 1
         probe_ok = 0
-        probe_timeout_s = max(0.05, settings.ws_stale_ms / 1000)
 
         async def probe_ok_batch(books: Any, _batch: list[str]) -> None:
             nonlocal probe_ok
@@ -1467,10 +1466,9 @@ async def run_paper(
 
         async def probe_one(batch: list[str]) -> None:
             try:
-                books = await asyncio.wait_for(
-                    _fetch_books(client, batch),
-                    timeout=probe_timeout_s,
-                )
+                # Do not add a short client-side deadline. A slow
+                # get_order_books is not a dead venue.
+                books = await _fetch_books(client, batch)
             except (PublicApiError, TimeoutError, asyncio.TimeoutError) as exc:
                 await log_batch_fail(batch, exc)
                 return
@@ -1613,9 +1611,11 @@ async def run_paper(
                 if await rest_probe_watch() == 0:
                     trip_dead_stream()
                 continue
+            # Stream age must not trip ws_stale. Official subscribe often
+            # dies after list/aclose while REST books still work.
             kill.evaluate(
                 daily_pnl=portfolio.daily_pnl,
-                ws_age_ms=age,
+                ws_age_ms=0,
                 now_ms=now_ms,
             )
 
@@ -1730,7 +1730,7 @@ async def run_paper(
                 now_ms = _now_ms()
                 kill.evaluate(
                     daily_pnl=portfolio.daily_pnl,
-                    ws_age_ms=heartbeat.age_ms(now_ms),
+                    ws_age_ms=0,
                     now_ms=now_ms,
                 )
                 break

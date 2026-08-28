@@ -67,7 +67,7 @@ Paper $500 bankroll + dashboard controls (not Task 12): paper-fill both legs at 
 - `uv run pytest -q` — 185 passed
 - Plan: `docs/plans/cursor-paper-bankroll-pnl.md`
 
-Paper trading helper (not Task 12): closest-book / near-miss JSONL + stats, `record_books.py` streams official public books, honest paper fills (FAK miss / maker rest / naked hedge), pin 8 hot pairs inside `WATCH_PAIRS=40`, local `alerts.jsonl`, `scripts/backtest_tape.py`. Caps unchanged (`min_edge` 0.01, `stale_ms` 400, `LIST_SAFETY_CAP` 5000). Task 12 stays dark.
+Paper trading helper (not Task 12): closest-book / near-miss JSONL + stats, `record_books.py` streams official public books, honest paper fills (FAK miss / maker rest / naked hedge), pin 8 hot pairs inside `WATCH_PAIRS=100`, local `alerts.jsonl`, `scripts/backtest_tape.py`. Caps unchanged (`min_edge` 0.01, `stale_ms` 400, `LIST_SAFETY_CAP` 5000). Task 12 stays dark.
 
 - `uv run pytest -q` — 216 passed
 - Plan: `docs/plans/cursor-paper-trading-helper.md`

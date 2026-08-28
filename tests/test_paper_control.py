@@ -32,7 +32,7 @@ def test_rotate_defaults_match_watch_slice() -> None:
     assert ROTATE_DEFAULT_S == WATCH_ROTATE_S == 1
     assert ROTATE_MIN_S == 1
     assert ROTATE_MAX_S == 120
-    assert WATCH_PAIRS == 40
+    assert WATCH_PAIRS == 100
 
 
 def test_clamp_rotate_s_is_1_to_120() -> None:
@@ -71,7 +71,7 @@ def test_slider_write_does_not_loosen_caps() -> None:
     assert fields["max_open_pairs"].default == 3
     assert fields["paper_bankroll"].default == Decimal("500")
     assert WATCH_ROTATE_S == 1
-    assert WATCH_PAIRS == 40
+    assert WATCH_PAIRS == 100
 
 
 def test_stop_pauses_without_spawning(tmp_path: Path) -> None:
@@ -139,6 +139,7 @@ def test_stop_and_spawn_source_stay_paper_only() -> None:
     assert "paper_run.py" in inspect.getsource(default_spawn)
     assert "--place-orders" not in inspect.getsource(default_spawn)
     assert "--all-markets" in inspect.getsource(default_spawn)
+    assert "--watch-pairs" in inspect.getsource(default_spawn)
     assert "--list-window-s" in inspect.getsource(default_spawn)
     assert '"60"' in inspect.getsource(default_spawn)
 

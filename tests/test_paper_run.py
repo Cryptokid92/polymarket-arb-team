@@ -1058,12 +1058,13 @@ def _gap_books_n(n: int) -> dict[str, object]:
 
 def test_book_batch_and_watch_defaults_fit_payload_limits() -> None:
     assert BOOK_BATCH_SIZE == 50
-    assert WATCH_PAIRS == 40
+    assert WATCH_PAIRS == 100
     assert WATCH_ROTATE_S == 1
     assert LIST_WINDOW_S == 60
     assert LIST_SAFETY_CAP == 5000
     assert BOOK_BATCH_SIZE < 100
-    assert WATCH_PAIRS * 2 == 80
+    assert WATCH_PAIRS * 2 == 200
+    assert WATCH_PAIRS * 2 < 500
 
 
 def test_chunk_ids_splits_without_one_fat_payload() -> None:
@@ -1112,7 +1113,7 @@ def test_batch_books_does_not_loosen_universe_or_risk() -> None:
     assert "LIST_SAFETY_CAP = 5000" in source
     assert "BOOK_BATCH_SIZE = 50" in source
     assert "BOOK_FETCH_CONCURRENCY = 4" in source
-    assert "WATCH_PAIRS = 40" in source
+    assert "WATCH_PAIRS = 100" in source
     assert "fetch_book_batches" in source
     assert 'return "neg_risk"' in source
     assert "seconds_delay" in source
@@ -1485,7 +1486,7 @@ def test_helper_caps_stay_tight() -> None:
     assert BOOK_BATCH_SIZE == 50
     assert BOOK_FETCH_CONCURRENCY == 4
     assert BOOK_FETCH_CONCURRENCY < BOOK_BATCH_SIZE
-    assert WATCH_PAIRS == 40
+    assert WATCH_PAIRS == 100
     from arb.app import PIN_HOT_PAIRS
 
     assert PIN_HOT_PAIRS == 8
@@ -2288,6 +2289,11 @@ def test_consider_does_not_evaluate_stream_age() -> None:
     halted_branch = halted_branch.split("age = heartbeat.age_ms", 1)[0]
     assert "ws_age_ms=0" in halted_branch
     assert "heartbeat.age_ms" not in halted_branch
+    assert "ws_age_ms=age" not in silence
+    assert "ws_age_ms=heartbeat.age_ms" not in source
+    probe = source.split("async def rest_probe_watch", 1)[1]
+    probe = probe.split("async def consume_slice", 1)[0]
+    assert "wait_for" not in probe
 
 
 def test_restore_progress_from_stats_keeps_hour_counters(tmp_path: Path) -> None:

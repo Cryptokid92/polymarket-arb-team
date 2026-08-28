@@ -139,6 +139,8 @@ def default_spawn(project_root: Path, data_dir: Path) -> None:
             "--seconds",
             "3600",
             "--all-markets",
+            "--watch-pairs",
+            "100",
             "--watch-rotate-s",
             "1",
             "--list-window-s",

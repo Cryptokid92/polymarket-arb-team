@@ -39,13 +39,13 @@ uv run python scripts/paper_run.py --seconds 3600
 # All open markets (walks list_markets pages; 5000-market windows).
 # Still refuses neg-risk / delay / non-binary / short crypto windows.
 # REST books in batches of 50 token ids (up to 4 in flight).
-# Watches 40 pairs (80 tokens); remaining window pairs rotate every 1s.
+# Watches 100 pairs (200 tokens); remaining window pairs rotate every 1s.
 # Next 5000 is listed, then the window swaps about every 60s.
 # When the catalog cursor is exhausted, the next list is page 1 again.
 # Do not subscribe all 1540. Do not raise 5000.
 uv run python scripts/paper_run.py --all-markets --seconds 3600
 # equivalent: --max-markets 0
-# optional: --book-batch-size 50 --watch-pairs 40 --watch-rotate-s 1
+# optional: --book-batch-size 50 --watch-pairs 100 --watch-rotate-s 1
 ```
 
 In another terminal, watch the gitignored logs (read-only local UI, binds `127.0.0.1:8765`):
@@ -91,7 +91,7 @@ These match the installed client in this repo. If they drift, follow the install
 
 - `AsyncPublicClient.list_markets(closed=False, page_size=100)` — paginator; the runner walks pages (`async for page in pages`) for one 5000-market window. Resume later windows with official `page.next_cursor` / `from_cursor`. `--all-markets` / `--max-markets 0` means no user cap; the 5000 ceiling is the window size, not the whole catalog.
 - `get_order_books(token_ids=...)` — snapshot asks+bids+depth, **batched** (default `--book-batch-size 50`). A failed batch is logged; other batches continue. One fat payload must not kill the run.
-- `subscribe(MarketSpec(token_ids=...))` **is** present. The runner watches a first slice only (default `--watch-pairs 40` = 80 tokens) and rotates remaining universe pairs (`--watch-rotate-s 1`). If `subscribe` is missing on a future client, it polls `get_order_books` in the same batches.
+- `subscribe(MarketSpec(token_ids=...))` **is** present. The runner watches a first slice only (default `--watch-pairs 100` = 200 tokens) and rotates remaining universe pairs (`--watch-rotate-s 1`). If `subscribe` is missing on a future client, it polls `get_order_books` in the same batches.
 
 ## Layout
 

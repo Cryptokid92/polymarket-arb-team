@@ -76,6 +76,14 @@ The recorded hour was not halted. After 70 completed / 1 naked / 74 intents, the
 
 The recorded hour halted again with `halt_reason=hedge_incidents`, 3 naked maker rows, fees `0`. Makers pay 0 on the venue; this is not a missing-fee bug. The rest model treated “still at our bid” as a fill. When one book moved and the other stayed, poll_rests marked the quiet side filled and hedged it — a false naked. One-sided still-at-bid now cancels both legs. A shown take (ask through / size down) still hedges. Human Start writes `hedge_resume_ms` so evaluate does not re-trip the same three; 3 new hedges / hour still kill.
 
+## `ws_stale` again (REST still writing)
+
+Official subscribe dies after list/`aclose`. `watch_silence` then passed stream age into `evaluate` on the live tick, and `rest_probe_watch` wrapped `get_order_books` in a 3s `wait_for`. A slow batch looked like a dead venue while listing/stats were still live. Stream age no longer trips `ws_stale`. The probe waits for the official fetch; only a real `PublicApiError` / timeout from the client trips. Human Start still required to clear a latched halt. Do not auto-resume.
+
+## Watch 100
+
+`--watch-pairs` default is 100 (200 token ids). Still batched at 50. Still not the whole universe. `PIN_HOT_PAIRS` stays 8. `min_edge` / `max_open_pairs` / `LIST_SAFETY_CAP` unchanged.
+
 ## Catalog wrap (do not stop the hour)
 
 Listing is 5000-market windows via official `next_cursor`. The hour used to `break` when the next window had the same condition ids and no further cursor — a one-page catalog, or a last-page repeat from Gamma. That looked like “it finished all books and stopped.” The loop now sets `after_cursor=None` (first page of 5000), increments `list_wraps`, and keeps watching until `--seconds`. Dashboard shows **catalog wraps**. Do not raise `LIST_SAFETY_CAP`.
