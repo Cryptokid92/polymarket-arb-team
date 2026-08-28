@@ -555,6 +555,7 @@ def test_html_uses_fullscreen_board_and_histogram_bars(tmp_path: Path) -> None:
     assert "unique listed" in page
     assert "unique walked" in page
     assert "next 5000 every" in page
+    assert "next 5000 in" in page
     assert "Different markets gone through" in page
     assert "9000" in page
     assert "800" in page

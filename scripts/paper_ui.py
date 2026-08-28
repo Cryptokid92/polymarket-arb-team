@@ -1114,6 +1114,10 @@ def render_html(summary: dict[str, Any]) -> str:
       {_metric("universe", counts["universe"])}
       {_metric("watching", watching)}
       {_metric("list window", list_window)}
+      {_metric(
+          "next 5000 in",
+          "listing" if list_next else f"{list_hold_s}s",
+      )}
       {_metric("gaps", counts["gaps"])}
       {_metric("intents", counts["intents"])}
       {_metric("rejects", counts["rejects"])}

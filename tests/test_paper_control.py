@@ -136,6 +136,9 @@ def test_stop_and_spawn_source_stay_paper_only() -> None:
     assert "ARB_MODE" in inspect.getsource(default_spawn)
     assert "paper_run.py" in inspect.getsource(default_spawn)
     assert "--place-orders" not in inspect.getsource(default_spawn)
+    assert "--all-markets" in inspect.getsource(default_spawn)
+    assert "--list-window-s" in inspect.getsource(default_spawn)
+    assert '"60"' in inspect.getsource(default_spawn)
 
 
 def test_start_resumes_ws_stale_when_no_halt_file(tmp_path: Path) -> None:
