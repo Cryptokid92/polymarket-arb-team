@@ -368,6 +368,9 @@ def summarize_dashboard(
     list_wraps = 0
     list_next_queued = False
     list_cursor = None
+    listed_unique = 0
+    universe_unique = 0
+    walked_unique = 0
     best_edge = None
     closest: dict[str, Any] | None = None
     edge_histogram: dict[str, Any] = {}
@@ -381,6 +384,9 @@ def summarize_dashboard(
         list_next_queued = stats.get("list_next_queued") is True
         if stats.get("list_cursor") is not None:
             list_cursor = str(stats.get("list_cursor"))
+        listed_unique = _int_or_zero(stats.get("listed_unique"))
+        universe_unique = _int_or_zero(stats.get("universe_unique"))
+        walked_unique = _int_or_zero(stats.get("walked_unique"))
         jsonl_gaps = max(jsonl_gaps, _int_or_zero(stats.get("gaps")))
         jsonl_intents = max(jsonl_intents, _int_or_zero(stats.get("intents")))
         jsonl_rejects = max(jsonl_rejects, _int_or_zero(stats.get("rejects")))
@@ -489,6 +495,9 @@ def summarize_dashboard(
             "list_wraps": list_wraps,
             "list_next_queued": list_next_queued,
             "list_cursor": list_cursor,
+            "listed_unique": listed_unique,
+            "universe_unique": universe_unique,
+            "walked_unique": walked_unique,
             "best_edge": best_edge,
             "closest": closest,
             "edge_histogram": edge_histogram,
@@ -687,6 +696,37 @@ def _watch_html(rows: list[dict[str, Any]]) -> str:
     return f'<div class="watch-list">{"".join(parts)}</div>'
 
 
+def _coverage_html(
+    *,
+    listed_unique: object,
+    universe_unique: object,
+    walked_unique: object,
+    window_listed: object,
+) -> str:
+    """Bars for unique markets gone through. Peak is unique listed."""
+    listed_n = _int_or_zero(listed_unique)
+    universe_n = _int_or_zero(universe_unique)
+    walked_n = _int_or_zero(walked_unique)
+    window_n = _int_or_zero(window_listed)
+    peak = max(listed_n, universe_n, walked_n, window_n, 1)
+    if listed_n <= 0 and walked_n <= 0 and window_n <= 0:
+        return (
+            '<p class="empty">No unique markets yet. Listed windows and '
+            "walked books will show here.</p>"
+        )
+    return (
+        '<div class="coverage">'
+        '<h2>Different markets gone through</h2>'
+        '<p class="empty">unique across windows — not this 5000 slice alone</p>'
+        '<div class="bars">'
+        f"{_bar_track(listed_n, peak, 'cool', 'unique listed', 'listed_unique')}"
+        f"{_bar_track(universe_n, peak, 'near', 'unique universe', 'universe_unique')}"
+        f"{_bar_track(walked_n, peak, 'hot', 'unique walked', 'walked_unique')}"
+        f"{_bar_track(window_n, peak, 'thin', 'this window', 'markets_listed')}"
+        "</div></div>"
+    )
+
+
 def _metric(label: str, value: object, *, extra: str = "", tone: str = "") -> str:
     klass = f"metric {tone}".strip()
     return (
@@ -711,6 +751,9 @@ def render_html(summary: dict[str, Any]) -> str:
     watching = paper.get("watching", 0)
     considers = paper.get("nearmiss_considers", 0)
     watch_rows = paper.get("watch") or []
+    listed_unique = paper.get("listed_unique", 0)
+    universe_unique = paper.get("universe_unique", 0)
+    walked_unique = paper.get("walked_unique", 0)
     pnl_lost = daily_pnl.startswith("-")
     pnl_label = "lost" if pnl_lost else "earned"
     pnl_class = "lost" if pnl_lost else "earned"
@@ -756,6 +799,8 @@ def render_html(summary: dict[str, Any]) -> str:
     list_note = (
         f"list window {_esc(list_window)}"
         + (" · next 5000 queued" if list_next else "")
+        + f" · unique listed {_esc(listed_unique)}"
+        + f" · unique walked {_esc(walked_unique)}"
     )
     run_status = str(summary["run_status"])
     return f"""<!DOCTYPE html>
@@ -897,6 +942,9 @@ def render_html(summary: dict[str, Any]) -> str:
     .panel .bars {{ flex: 1; justify-content: space-evenly; }}
     .hero-edge {{ padding: 2px 2px 0; flex: 0 0 auto; }}
     .watch-wrap {{ flex: 1; min-height: 0; display: flex; flex-direction: column; margin-top: 8px; }}
+    .coverage {{ flex: 0 0 auto; margin: 0 0 8px; }}
+    .coverage .bars {{ gap: 4px; }}
+    .coverage .bar-track {{ height: 7px; }}
     .watch-list {{
       flex: 1; min-height: 0; overflow: auto; display: flex; flex-direction: column; gap: 3px;
     }}
@@ -1032,6 +1080,8 @@ def render_html(summary: dict[str, Any]) -> str:
       {_metric("paper bankroll", bankroll, extra='<span class="k">not real money</span>')}
       {_metric(f"realized PnL ({pnl_label})", daily_pnl, tone=pnl_class)}
       {_metric("markets listed", counts["markets_listed"])}
+      {_metric("unique listed", listed_unique)}
+      {_metric("unique walked", walked_unique)}
       {_metric("universe", counts["universe"])}
       {_metric("watching", watching)}
       {_metric("list window", list_window)}
@@ -1051,6 +1101,12 @@ def render_html(summary: dict[str, Any]) -> str:
       <div class="watch-wrap">
         <h2>Watching now ({_esc(watching)})</h2>
         <p class="empty">{list_note}</p>
+        {_coverage_html(
+            listed_unique=listed_unique,
+            universe_unique=universe_unique,
+            walked_unique=walked_unique,
+            window_listed=counts["markets_listed"],
+        )}
         {_watch_html(watch_rows)}
       </div>
     </section>

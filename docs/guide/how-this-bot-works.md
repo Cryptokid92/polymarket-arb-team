@@ -147,7 +147,8 @@ Logs are gitignored under `data/` (default `data/paper/`):
 - `nearmiss.jsonl` — closest walked books (new best or non-negative walked edge)
 - `alerts.jsonl` — local paper alerts when an intent is chosen
 - `books.jsonl` — optional recorded public books (`--record-books`)
-- `stats.json` — listed / universe / gap / intent / reject / fill counts, `bankroll`, `daily_pnl`, closest edge, histogram, list window, `heartbeat_ms`
+- `stats.json` — listed / universe / gap / intent / reject / fill counts, `bankroll`, `daily_pnl`, closest edge, histogram, list window, unique listed/walked, `heartbeat_ms`
+- `seen_markets.json` — unique condition ids listed or walked across windows (gitignored)
 - `list_cursor.json` — official `next_cursor` plus next window number
 - `fills.jsonl` — paper fills, completed pairs, naked incidents
 - `control.json` — local pause + watch-rotate interval (1–120s)

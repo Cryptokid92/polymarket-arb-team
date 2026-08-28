@@ -77,10 +77,10 @@ Writes gitignored JSONL (covered by `data/`):
 - `data/paper/gaps.jsonl` — hunter hits (edge, VWAPs, estimated maker/taker EV)
 - `data/paper/intents.jsonl` — paper-only approved intents (`PaperBroker`)
 - `data/paper/rejects.jsonl` — universe / risk / fee reject reasons
-- `data/paper/stats.json` — markets listed / universe / gap / intent / reject counts plus `bankroll`, `daily_pnl`, `fills`, and `heartbeat_ms` for the dashboard
+- `data/paper/stats.json` — markets listed / universe / unique listed / unique walked plus `bankroll`, `daily_pnl`, `fills`, and `heartbeat_ms` for the dashboard
 - `data/paper/fills.jsonl` — paper fills and completeness PnL (not real money)
 
-`paper_ui.py` shows paper bankroll, realized PnL (earned/lost), intents, fills, the current list window, and the watch slice. If the JSONL files are missing it shows zeros and does not invent trades. Local Start/Stop pauses or launches `paper_run` (`ARB_MODE=paper`); Start is the human resume for a prior `ws_stale` when no `HALT` file is present. The watch-rotate slider (1–120s) writes `control.json` and does not change risk caps. Data is GET; control POSTs are 127.0.0.1 only. Run status follows the newest JSONL timestamp, `stats.json` mtime, or `heartbeat_ms` — a live runner rewriting stats is **running**, not stale. Halt still comes only from `HALT` / sqlite. `ws_stale` means the stream or REST probe failed, not daily loss. Banner: **PAPER MODE. Not live. Not financial advice.** Auto-refreshes every 2s. Paper $500 is not real money.
+`paper_ui.py` shows paper bankroll, realized PnL (earned/lost), intents, fills, unique markets listed/walked across windows, the current list window, and the watch slice. If the JSONL files are missing it shows zeros and does not invent trades. Local Start/Stop pauses or launches `paper_run` (`ARB_MODE=paper`); Start is the human resume for a prior `ws_stale` when no `HALT` file is present. The watch-rotate slider (1–120s) writes `control.json` and does not change risk caps. Data is GET; control POSTs are 127.0.0.1 only. Run status follows the newest JSONL timestamp, `stats.json` mtime, or `heartbeat_ms` — a live runner rewriting stats is **running**, not stale. Halt still comes only from `HALT` / sqlite. `ws_stale` means the stream or REST probe failed, not daily loss. Banner: **PAPER MODE. Not live. Not financial advice.** Auto-refreshes every 2s. Paper $500 is not real money.
 
 `report_paper.py` prints: gaps seen, intents approved, estimated maker EV, estimated taker EV, reject reasons.
 

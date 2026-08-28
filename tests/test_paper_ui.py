@@ -326,6 +326,9 @@ def test_write_paper_stats_has_no_account_fields(tmp_path: Path) -> None:
         "list_cursor": None,
         "list_wraps": 0,
         "list_next_queued": False,
+        "listed_unique": 0,
+        "universe_unique": 0,
+        "walked_unique": 0,
         "heartbeat_ms": 1_700_000_000_123,
     }
     blob = path.read_text(encoding="utf-8")
@@ -514,6 +517,9 @@ def test_html_uses_fullscreen_board_and_histogram_bars(tmp_path: Path) -> None:
             universe=12,
             watching=40,
             nearmiss_considers=9,
+            listed_unique=9000,
+            universe_unique=2100,
+            walked_unique=800,
             best_edge=Decimal("-0.001"),
             closest_condition_id="c-near",
             closest_fillable=Decimal("5"),
@@ -544,6 +550,13 @@ def test_html_uses_fullscreen_board_and_histogram_bars(tmp_path: Path) -> None:
     page = ui.render_html(summary)
     assert "Watching now" in page
     assert "list window" in page
+    assert "unique listed" in page
+    assert "unique walked" in page
+    assert "Different markets gone through" in page
+    assert "9000" in page
+    assert "800" in page
+    assert summary["paper"]["listed_unique"] == 9000
+    assert summary["paper"]["walked_unique"] == 800
     assert "Will it rain?" in page
     assert "c-hot" in page
     assert "c-rot" in page
@@ -560,6 +573,24 @@ def test_html_uses_fullscreen_board_and_histogram_bars(tmp_path: Path) -> None:
     assert "Closest book this hour" in page
     assert "not halted" in page
     assert "HALTED" not in page
+
+
+def test_coverage_html_uses_unique_listed_as_scale() -> None:
+    ui = _load_script()
+    html = ui._coverage_html(
+        listed_unique=100,
+        universe_unique=40,
+        walked_unique=10,
+        window_listed=50,
+    )
+    assert "Different markets gone through" in html
+    assert 'data-bucket="listed_unique"' in html
+    assert 'data-bucket="walked_unique"' in html
+    assert ">100<" in html or ">100</span>" in html
+    empty = ui._coverage_html(
+        listed_unique=0, universe_unique=0, walked_unique=0, window_listed=0
+    )
+    assert "No unique markets yet" in empty
 
 
 def test_http_control_stop_and_slider(tmp_path: Path) -> None:

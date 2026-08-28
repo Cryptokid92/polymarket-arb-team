@@ -33,6 +33,7 @@ from arb.paper_control import (
 from arb.paper_ledger import PaperFillResult, PaperLedger
 from arb.recorder import BookRecorder, book_to_event
 from arb.risk import MarketFlags, Portfolio, approve
+from arb.seen import load_seen_markets
 from arb.state import StateStore
 from arb.watch import hot_watch_slice, watch_board_rows
 
@@ -122,6 +123,9 @@ class PaperRunStats:
     list_cursor: str | None = None
     list_wraps: int = 0
     list_next_queued: bool = False
+    listed_unique: int = 0
+    universe_unique: int = 0
+    walked_unique: int = 0
 
 
 class StreamHeartbeat:
@@ -405,6 +409,9 @@ def write_paper_stats(
         "list_cursor": stats.list_cursor,
         "list_wraps": stats.list_wraps,
         "list_next_queued": stats.list_next_queued,
+        "listed_unique": stats.listed_unique,
+        "universe_unique": stats.universe_unique,
+        "walked_unique": stats.walked_unique,
         "heartbeat_ms": _now_ms() if now_ms is None else now_ms,
     }
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -846,6 +853,8 @@ async def run_paper(
     saved_cursor, saved_window, saved_wraps = read_list_cursor_state(data_dir)
     stats.list_window = saved_window
     stats.list_wraps = saved_wraps
+    seen = load_seen_markets(data_dir)
+    seen.apply_to(stats)
     pairs: list[UniversePair] = []
     by_token: dict[str, UniversePair] = {}
     watch_offset = 0
@@ -853,19 +862,25 @@ async def run_paper(
     def ingest_markets(markets: list[Any]) -> list[UniversePair]:
         kept: list[UniversePair] = []
         for market in markets:
+            cid = str(getattr(market, "condition_id", "") or "")
+            seen.note_listed(cid)
             reason = reject_universe(market)
             if reason is not None:
                 _append_jsonl(
                     rejects_path,
                     {
                         "ts_ms": _now_ms(),
-                        "condition_id": str(getattr(market, "condition_id", "") or ""),
+                        "condition_id": cid,
                         "reason": reason,
                     },
                 )
                 _bump(stats, reason)
                 continue
-            kept.append(universe_pair(market))
+            pair = universe_pair(market)
+            seen.note_universe(pair.condition_id)
+            kept.append(pair)
+        seen.apply_to(stats)
+        seen.save(data_dir)
         return kept
 
     def replace_pairs(new_pairs: list[UniversePair]) -> None:
@@ -994,6 +1009,8 @@ async def run_paper(
         no = store.get(pair.no_token_id)
         if yes is None or no is None:
             return
+        seen.note_walked(pair.condition_id)
+        seen.apply_to(stats)
         now_ms = _now_ms()
         in_watch = pair.condition_id in watch_ids()
         portfolio.halted = not kill.allow_new_intents()
@@ -1159,6 +1176,8 @@ async def run_paper(
         await expire_rests(force_timeout=True)
         _sync_tracker_stats(stats, tracker)
         refresh_watch_board()
+        seen.apply_to(stats)
+        seen.save(data_dir)
         write_paper_stats(stats_path, stats)
         if recorder is not None:
             recorder.close()
@@ -1471,5 +1490,7 @@ async def run_paper(
         clear_pid(data_dir)
     _sync_tracker_stats(stats, tracker)
     stats.list_next_queued = False
+    seen.apply_to(stats)
+    seen.save(data_dir)
     write_paper_stats(stats_path, stats)
     return stats
