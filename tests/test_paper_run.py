@@ -938,7 +938,7 @@ def _gap_books_n(n: int) -> dict[str, object]:
 def test_book_batch_and_watch_defaults_fit_payload_limits() -> None:
     assert BOOK_BATCH_SIZE == 50
     assert WATCH_PAIRS == 40
-    assert WATCH_ROTATE_S == 90
+    assert WATCH_ROTATE_S == 10
     assert LIST_SAFETY_CAP == 5000
     assert BOOK_BATCH_SIZE < 100
     assert WATCH_PAIRS * 2 == 80

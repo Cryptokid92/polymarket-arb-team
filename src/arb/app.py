@@ -54,7 +54,7 @@ WATCH_PAIRS = 40
 PIN_HOT_PAIRS = 8
 # Rotate the watch window so the rest of the universe is visited during
 # a 1-hour run. 90s * 40 pairs ≈ 1600 pair-looks/hour.
-WATCH_ROTATE_S = 90
+WATCH_ROTATE_S = 10
 _SHORT_WINDOW = re.compile(
     r"(?:^|[^0-9])(?:5|15)(?:\s|-)?(?:m(?:in(?:ute)?s?)?)\b",
     re.IGNORECASE,

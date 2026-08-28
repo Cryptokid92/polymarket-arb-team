@@ -25,7 +25,7 @@ from arb.paper_control import (
 
 
 def test_rotate_defaults_match_watch_slice() -> None:
-    assert ROTATE_DEFAULT_S == WATCH_ROTATE_S == 90
+    assert ROTATE_DEFAULT_S == WATCH_ROTATE_S == 10
     assert ROTATE_MIN_S == 10
     assert ROTATE_MAX_S == 120
     assert WATCH_PAIRS == 40
@@ -38,7 +38,7 @@ def test_clamp_rotate_s_is_10_to_120() -> None:
     assert clamp_rotate_s(9) == 10
     assert clamp_rotate_s(121) == 120
     assert clamp_rotate_s("45") == 45
-    assert clamp_rotate_s("nope") == 90
+    assert clamp_rotate_s("nope") == 10
 
 
 def test_slider_write_persists_rotate_s(tmp_path: Path) -> None:
@@ -65,7 +65,7 @@ def test_slider_write_does_not_loosen_caps() -> None:
     assert fields["max_daily_loss"].default == Decimal("50")
     assert fields["max_open_pairs"].default == 3
     assert fields["paper_bankroll"].default == Decimal("500")
-    assert WATCH_ROTATE_S == 90
+    assert WATCH_ROTATE_S == 10
     assert WATCH_PAIRS == 40
 
 

@@ -60,7 +60,7 @@ def test_summarize_fixture_counts(tmp_path: Path) -> None:
     assert summary["paper"]["bankroll"] == "500"
     assert summary["paper"]["daily_pnl"] == "0"
     assert summary["recent_fills"] == []
-    assert summary["control"]["rotate_s"] == 90
+    assert summary["control"]["rotate_s"] == 10
     assert summary["reject_reasons"] == {
         "neg_risk": 1,
         "short_crypto_window": 1,
