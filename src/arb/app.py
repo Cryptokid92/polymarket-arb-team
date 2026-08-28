@@ -34,7 +34,7 @@ from arb.paper_ledger import PaperFillResult, PaperLedger
 from arb.recorder import BookRecorder, book_to_event
 from arb.risk import MarketFlags, Portfolio, approve
 from arb.state import StateStore
-from arb.watch import hot_watch_slice
+from arb.watch import hot_watch_slice, watch_board_rows
 
 _TAKER_BUFFER = Decimal("0.005")
 _MAX_SHARES = Decimal("1000000")
@@ -82,6 +82,7 @@ class UniversePair:
     no_token_id: str
     flags: MarketFlags
     fees: MarketFees
+    label: str = ""
 
 
 @dataclass
@@ -106,6 +107,7 @@ class PaperRunStats:
     closest_thin: bool | None = None
     nearmiss_considers: int = 0
     edge_histogram: dict[str, int] = field(default_factory=dict)
+    watch: list[dict[str, Any]] = field(default_factory=list)
 
 
 class StreamHeartbeat:
@@ -300,6 +302,12 @@ def universe_pair(market: Any) -> UniversePair:
             binary=True,
         ),
         fees=MarketFees(yes_rate=fee_rate, no_rate=fee_rate),
+        label=str(
+            getattr(market, "question", None)
+            or getattr(market, "slug", None)
+            or getattr(market, "group_item_title", None)
+            or ""
+        ),
     )
 
 
@@ -378,6 +386,7 @@ def write_paper_stats(
         "closest_thin": stats.closest_thin,
         "nearmiss_considers": stats.nearmiss_considers,
         "edge_histogram": dict(stats.edge_histogram),
+        "watch": list(stats.watch),
         "heartbeat_ms": _now_ms() if now_ms is None else now_ms,
     }
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -751,9 +760,7 @@ async def run_paper(
     batch_size = max(1, int(book_batch_size))
     watch_n = max(1, int(watch_pairs))
     rotate_s = float(watch_rotate_s)
-    stats.watching = min(len(pairs), watch_n)
     watch_offset = 0
-    write_paper_stats(stats_path, stats)
 
     def current_watch_pairs() -> list[UniversePair]:
         return hot_watch_slice(
@@ -765,6 +772,26 @@ async def run_paper(
             condition_id_of=lambda item: item.condition_id,
             rotate_slice=watch_slice,
         )
+
+    def pinned_watch_n() -> int:
+        pinned_n = min(PIN_HOT_PAIRS, watch_n, len(pairs))
+        if len(pairs) > watch_n:
+            pinned_n = min(pinned_n, max(0, watch_n - 1))
+        return pinned_n
+
+    def refresh_watch_board() -> None:
+        watched = current_watch_pairs()
+        stats.watching = len(watched)
+        stats.watch = watch_board_rows(
+            watched,
+            watch_scores,
+            pinned_n=pinned_watch_n(),
+            condition_id_of=lambda item: item.condition_id,
+            label_of=lambda item: item.label or item.condition_id,
+        )
+
+    refresh_watch_board()
+    write_paper_stats(stats_path, stats)
 
     def current_watch_tokens() -> list[str]:
         return pair_token_ids(current_watch_pairs())
@@ -901,6 +928,7 @@ async def run_paper(
         stats.bankroll = ledger.bankroll
         stats.daily_pnl = ledger.daily_pnl
         _sync_tracker_stats(stats, tracker)
+        refresh_watch_board()
         write_paper_stats(stats_path, stats)
 
     all_token_ids = pair_token_ids(pairs)
@@ -943,7 +971,7 @@ async def run_paper(
             if pair.condition_id in watch_ids():
                 record_pair_books(pair)
             await consider(pair)
-        stats.watching = len(current_watch_pairs())
+        refresh_watch_board()
         write_paper_stats(stats_path, stats)
 
     if all_token_ids:
@@ -965,6 +993,7 @@ async def run_paper(
     if once or not all_token_ids:
         await expire_rests(force_timeout=True)
         _sync_tracker_stats(stats, tracker)
+        refresh_watch_board()
         write_paper_stats(stats_path, stats)
         if recorder is not None:
             recorder.close()
@@ -974,7 +1003,7 @@ async def run_paper(
     deadline = time.monotonic() + seconds
     rotated = asyncio.Event()
 
-    stats.watching = len(current_watch_pairs())
+    refresh_watch_board()
     write_paper_stats(stats_path, stats)
 
     def trip_dead_stream() -> None:
@@ -1109,7 +1138,7 @@ async def run_paper(
                 on_fail=log_batch_fail,
                 raise_if_all_fail=False,
             )
-            stats.watching = len(current_watch_pairs())
+            refresh_watch_board()
             write_paper_stats(stats_path, stats)
             rotated.set()
 

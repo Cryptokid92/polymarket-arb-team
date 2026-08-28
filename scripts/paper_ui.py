@@ -363,6 +363,7 @@ def summarize_dashboard(
     naked_incidents = 0
     watching = 0
     nearmiss_considers = 0
+    watch_rows: list[dict[str, Any]] = []
     best_edge = None
     closest: dict[str, Any] | None = None
     edge_histogram: dict[str, Any] = {}
@@ -390,6 +391,21 @@ def summarize_dashboard(
         hist = stats.get("edge_histogram")
         if isinstance(hist, dict):
             edge_histogram = {str(key): _int_or_zero(value) for key, value in hist.items()}
+        raw_watch = stats.get("watch")
+        if isinstance(raw_watch, list):
+            for row in raw_watch:
+                if not isinstance(row, dict) or not row.get("condition_id"):
+                    continue
+                watch_rows.append(
+                    {
+                        "condition_id": str(row.get("condition_id")),
+                        "label": str(row.get("label") or row.get("condition_id")),
+                        "pinned": row.get("pinned") is True,
+                        "raw_edge": (
+                            None if row.get("raw_edge") is None else str(row.get("raw_edge"))
+                        ),
+                    }
+                )
         if stats.get("closest_condition_id"):
             closest = {
                 "condition_id": stats.get("closest_condition_id"),
@@ -463,6 +479,7 @@ def summarize_dashboard(
             "best_edge": best_edge,
             "closest": closest,
             "edge_histogram": edge_histogram,
+            "watch": watch_rows,
         },
         "closest": closest,
         "best_edge": best_edge,
@@ -635,6 +652,28 @@ def _reason_bars_html(reasons: dict[str, Any]) -> str:
     )
 
 
+def _watch_html(rows: list[dict[str, Any]]) -> str:
+    if not rows:
+        return '<p class="empty">No watch slice yet. The runner has not subscribed.</p>'
+    parts: list[str] = []
+    for row in rows:
+        tone = _edge_tone(row.get("raw_edge"))
+        kind = "pin" if row.get("pinned") else "rot"
+        kind_label = "pin" if row.get("pinned") else "rot"
+        edge = row.get("raw_edge")
+        edge_txt = "—" if edge is None else str(edge)
+        parts.append(
+            f'<div class="watch-row {kind} {tone}">'
+            f'<span class="watch-kind">{kind_label}</span>'
+            f'<span class="watch-label" title="{_esc(row.get("condition_id"))}">'
+            f'{_esc(row.get("label"))}</span>'
+            f'<span class="watch-edge">{_esc(edge_txt)}</span>'
+            f'<span class="watch-id">{_esc(row.get("condition_id"))}</span>'
+            f"</div>"
+        )
+    return f'<div class="watch-list">{"".join(parts)}</div>'
+
+
 def _metric(label: str, value: object, *, extra: str = "", tone: str = "") -> str:
     klass = f"metric {tone}".strip()
     return (
@@ -658,6 +697,7 @@ def render_html(summary: dict[str, Any]) -> str:
     histogram = paper.get("edge_histogram") or {}
     watching = paper.get("watching", 0)
     considers = paper.get("nearmiss_considers", 0)
+    watch_rows = paper.get("watch") or []
     pnl_lost = daily_pnl.startswith("-")
     pnl_label = "lost" if pnl_lost else "earned"
     pnl_class = "lost" if pnl_lost else "earned"
@@ -822,6 +862,33 @@ def render_html(summary: dict[str, Any]) -> str:
     .panel-hist {{ grid-column: 2; grid-row: 1 / span 2; }}
     .panel .bars {{ flex: 1; justify-content: space-evenly; }}
     .hero-edge {{ padding: 4px 2px 0; }}
+    .watch-wrap {{ flex: 1; min-height: 0; display: flex; flex-direction: column; margin-top: 8px; }}
+    .watch-list {{
+      flex: 1; min-height: 0; overflow: auto; display: flex; flex-direction: column; gap: 4px;
+    }}
+    .watch-row {{
+      display: grid; grid-template-columns: 36px minmax(0, 1fr) auto;
+      gap: 8px; align-items: center;
+      background: var(--panel-2); border: 1px solid var(--line); border-radius: 8px;
+      padding: 5px 8px; font-size: 12px;
+    }}
+    .watch-row.pin {{ border-color: #8a6a1a; box-shadow: inset 3px 0 0 var(--amber); }}
+    .watch-kind {{
+      text-transform: uppercase; letter-spacing: 0.06em; font-size: 10px; color: var(--amber);
+      font-weight: 800;
+    }}
+    .watch-row.rot .watch-kind {{ color: var(--cyan); }}
+    .watch-label {{
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ink);
+    }}
+    .watch-edge {{
+      font-family: "IBM Plex Mono", ui-monospace, Menlo, Consolas, monospace;
+      font-weight: 700;
+    }}
+    .watch-row.hot .watch-edge {{ color: var(--green); }}
+    .watch-row.near .watch-edge, .watch-row.close .watch-edge {{ color: var(--amber); }}
+    .watch-row.cold .watch-edge {{ color: var(--red); }}
+    .watch-id {{ display: none; }}
     .hero-n {{
       font-family: "IBM Plex Mono", ui-monospace, Menlo, Consolas, monospace;
       font-size: clamp(36px, 5vw, 64px); font-weight: 800; line-height: 1;
@@ -942,6 +1009,10 @@ def render_html(summary: dict[str, Any]) -> str:
     <section class="panel">
       <h2>Closest book this hour</h2>
       {closest_html}
+      <div class="watch-wrap">
+        <h2>Watching now ({_esc(watching)})</h2>
+        {_watch_html(watch_rows)}
+      </div>
     </section>
     <section class="panel panel-hist">
       <h2>Edge histogram (walked asks; thin is none)</h2>

@@ -57,3 +57,32 @@ def hot_watch_slice(
     rotate_n = watch_n - len(pinned)
     rotating = rotate_slice(rest, offset, rotate_n) if rest and rotate_n > 0 else []
     return list(pinned) + list(rotating)
+
+
+def watch_board_rows(
+    watched: Sequence[T],
+    scores: Mapping[str, Decimal],
+    *,
+    pinned_n: int,
+    condition_id_of,
+    label_of,
+) -> list[dict[str, object]]:
+    """Snapshot of the current watch slice for the paper UI. Not a trade."""
+    pin = max(0, int(pinned_n))
+    rows: list[dict[str, object]] = []
+    for index, item in enumerate(watched):
+        cid = str(condition_id_of(item))
+        raw = scores.get(cid)
+        edge = None
+        if raw is not None and raw != _MISSING:
+            edge = str(_reject_float(raw, "watch_score"))
+        label = str(label_of(item) or cid)
+        rows.append(
+            {
+                "condition_id": cid,
+                "label": label,
+                "pinned": index < pin,
+                "raw_edge": edge,
+            }
+        )
+    return rows
