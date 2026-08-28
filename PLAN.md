@@ -74,4 +74,6 @@ Phase A telemetry (edge thresholds, max edge per window, watch-while-list). Tape
 
 ## Remaining
 
-12. Live path (build dark, do not run) — not now. Agents never create `ALLOW_LIVE`. This host is not a live venue. One positive paper tape is not a live go.
+Completeness strategy **frozen** after two honest paper hours (0 completes; hour 2 paper `-0.20` on a naked hedge). Do not loosen `min_edge`. Do not restore still-at-bid fills.
+
+12. Live path (build dark, do not run) — not now. Agents never create `ALLOW_LIVE`. This host is not a live venue. Two honest non-positive hours are not a live go.

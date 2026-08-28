@@ -1,8 +1,12 @@
 # polymarket-arb-team
 
+**Frozen.** Two honest paper hours showed the YES+NO completeness trade is not on the live book (`best_edge=-0.001`, 0 completed pairs). Hour 2 paper PnL `-0.20` on one naked hedge. Do not add features to make this bot print. Do not lower `min_edge`. Do not go live. Do not create `ALLOW_LIVE`.
+
+Evidence: [2026-08-28-honest-hour.md](docs/debug-reports/2026-08-28-honest-hour.md), [2026-08-28-honest-hour2.md](docs/debug-reports/2026-08-28-honest-hour2.md).
+
 Paper-first completeness arbitrage bot for [Polymarket](https://polymarket.com).
 
-This repository scaffolds a **paper-mode** specialist team that looks for completeness (YES + NO) mispricings. It is research and software infrastructure only. Paper bankroll is **$500** and is **not real money**.
+This repository is a frozen **paper-mode** specialist team that looks for completeness (YES + NO) mispricings. It is research and software infrastructure only. Paper bankroll is **$500** and is **not real money**.
 
 **Not financial advice.** Nothing here is an offer, solicitation, or recommendation to trade. There is **no guaranteed PnL**. Markets can gap, quotes can go stale, and a half-filled arb is worse than no trade.
 
