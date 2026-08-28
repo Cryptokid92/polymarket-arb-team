@@ -364,6 +364,10 @@ def summarize_dashboard(
     watching = 0
     nearmiss_considers = 0
     watch_rows: list[dict[str, Any]] = []
+    list_window = 1
+    list_wraps = 0
+    list_next_queued = False
+    list_cursor = None
     best_edge = None
     closest: dict[str, Any] | None = None
     edge_histogram: dict[str, Any] = {}
@@ -372,6 +376,11 @@ def summarize_dashboard(
         universe = _int_or_zero(stats.get("universe"))
         watching = _int_or_zero(stats.get("watching"))
         nearmiss_considers = _int_or_zero(stats.get("nearmiss_considers"))
+        list_window = max(1, _int_or_zero(stats.get("list_window")) or 1)
+        list_wraps = _int_or_zero(stats.get("list_wraps"))
+        list_next_queued = stats.get("list_next_queued") is True
+        if stats.get("list_cursor") is not None:
+            list_cursor = str(stats.get("list_cursor"))
         jsonl_gaps = max(jsonl_gaps, _int_or_zero(stats.get("gaps")))
         jsonl_intents = max(jsonl_intents, _int_or_zero(stats.get("intents")))
         jsonl_rejects = max(jsonl_rejects, _int_or_zero(stats.get("rejects")))
@@ -476,6 +485,10 @@ def summarize_dashboard(
             "naked_incidents": naked_incidents,
             "watching": watching,
             "nearmiss_considers": nearmiss_considers,
+            "list_window": list_window,
+            "list_wraps": list_wraps,
+            "list_next_queued": list_next_queued,
+            "list_cursor": list_cursor,
             "best_edge": best_edge,
             "closest": closest,
             "edge_histogram": edge_histogram,
@@ -727,6 +740,23 @@ def render_html(summary: dict[str, Any]) -> str:
     sqlite_bit = "yes" if halt.get("sqlite_exists") else "no"
     halt_file_bit = "yes" if halt.get("halt_file") else "no"
     halt_reason = halt.get("halt_reason") or "none"
+    if halt.get("halted") and halt_reason == "ws_stale":
+        halt_hint = (
+            "ws_stale means the stream or REST probe failed, not daily loss. "
+            "Start (human) clears it when no HALT file is present."
+        )
+    elif halt.get("halted") and halt_reason == "daily_loss":
+        halt_hint = "daily_loss is a real kill. Human Start required. Not auto-resumed."
+    elif halt.get("halted"):
+        halt_hint = f"Halt reason {halt_reason}. Not auto-resumed."
+    else:
+        halt_hint = ""
+    list_window = paper.get("list_window", 1)
+    list_next = paper.get("list_next_queued") is True
+    list_note = (
+        f"list window {_esc(list_window)}"
+        + (" · next 5000 queued" if list_next else "")
+    )
     run_status = str(summary["run_status"])
     return f"""<!DOCTYPE html>
 <html lang="en">
@@ -808,6 +838,7 @@ def render_html(summary: dict[str, Any]) -> str:
     .earned {{ color: var(--green); }}
     .lost {{ color: var(--red); }}
     .halted {{ color: var(--red); font-weight: 700; }}
+    .halt-hint {{ color: var(--amber); font-size: 12px; }}
     .controls {{
       display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px;
     }}
@@ -977,6 +1008,7 @@ def render_html(summary: dict[str, Any]) -> str:
       · last event {_esc(_age_label(summary.get("last_event_age_ms")))}
       · halt: <span class="{halt_class}">{halt_label}</span>
       · halt reason: {_esc(halt_reason)}
+      {f'<span class="halt-hint">{_esc(halt_hint)}</span>' if halt_hint else ""}
       · HALT file: {halt_file_bit}
       · sqlite: {sqlite_bit}
       · sources: {_esc(sources)}
@@ -1002,6 +1034,7 @@ def render_html(summary: dict[str, Any]) -> str:
       {_metric("markets listed", counts["markets_listed"])}
       {_metric("universe", counts["universe"])}
       {_metric("watching", watching)}
+      {_metric("list window", list_window)}
       {_metric("gaps", counts["gaps"])}
       {_metric("intents", counts["intents"])}
       {_metric("rejects", counts["rejects"])}
@@ -1017,6 +1050,7 @@ def render_html(summary: dict[str, Any]) -> str:
       {closest_html}
       <div class="watch-wrap">
         <h2>Watching now ({_esc(watching)})</h2>
+        <p class="empty">{list_note}</p>
         {_watch_html(watch_rows)}
       </div>
     </section>

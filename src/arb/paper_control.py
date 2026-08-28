@@ -15,6 +15,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from arb.state import StateStore
+
 CONTROL_FILENAME = "control.json"
 PID_FILENAME = "paper_run.pid"
 ROTATE_MIN_S = 10
@@ -144,6 +146,26 @@ def default_spawn(project_root: Path, data_dir: Path) -> None:
     )
 
 
+def resume_paper_halt(project_root: Path, data_dir: Path) -> bool:
+    """Human Start only. Clears sqlite halt when no HALT file is present.
+
+    Never called from the runner loop. Daily-loss / hedge stay halted until
+    this human click. A HALT file still blocks resume.
+    """
+    root = Path(project_root)
+    folder = Path(data_dir)
+    if (root / "HALT").is_file() or (folder / "HALT").is_file():
+        return False
+    sqlite = folder / "state.sqlite"
+    if not sqlite.is_file():
+        return True
+    store = StateStore(sqlite)
+    if not store.restore().halted:
+        return True
+    store.set_halted(False)
+    return True
+
+
 def apply_control(
     data_dir: Path,
     *,
@@ -173,8 +195,9 @@ def apply_control(
     elif action == "start":
         control.paused = False
         write_control(data_dir, control)
+        root = Path(project_root) if project_root is not None else Path.cwd()
+        resume_paper_halt(root, Path(data_dir))
         if not runner_is_alive(data_dir):
-            root = Path(project_root) if project_root is not None else Path.cwd()
             (spawn or default_spawn)(root, Path(data_dir))
             started = True
     else:

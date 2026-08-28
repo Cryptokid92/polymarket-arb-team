@@ -222,6 +222,33 @@ def test_book_from_payload_empty_min_order_uses_previous_or_default() -> None:
     assert fresh.tick == Decimal("0.01")
 
 
+def test_retain_drops_books_that_left_the_window() -> None:
+    store = BookStore()
+    store.apply_snapshot(
+        {
+            "token_id": "keep",
+            "bids": [],
+            "asks": [{"price": "0.56", "size": "80"}],
+            "tick": "0.01",
+            "min_order_size": "5",
+            "ts_ms": 1000,
+        }
+    )
+    store.apply_snapshot(
+        {
+            "token_id": "drop",
+            "bids": [],
+            "asks": [{"price": "0.56", "size": "80"}],
+            "tick": "0.01",
+            "min_order_size": "5",
+            "ts_ms": 1000,
+        }
+    )
+    store.retain(["keep"])
+    assert store.get("keep") is not None
+    assert store.get("drop") is None
+
+
 def test_apply_snapshot_empty_price_still_raises() -> None:
     store = BookStore()
     with pytest.raises(InvalidOperation):

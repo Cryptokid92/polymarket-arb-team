@@ -47,6 +47,9 @@ LIST_SAFETY_CAP = 5000
 # request of ~3080 ids ("Payload exceeds the limit"). 50 stays under
 # official CLOB payload limits.
 BOOK_BATCH_SIZE = 50
+# In-flight get_order_books calls. Do not raise BOOK_BATCH_SIZE.
+BOOK_FETCH_CONCURRENCY = 4
+LIST_CURSOR_FILENAME = "list_cursor.json"
 # Live subscribe/poll window. 40 pairs = 80 token ids. Do not subscribe
 # all ~1540 universe pairs at once.
 WATCH_PAIRS = 40
@@ -73,6 +76,12 @@ class PipelineTrace:
     maker_ev: Decimal | None
     taker_ev: Decimal | None
     near_miss: NearMiss | None = None
+
+
+@dataclass
+class ListedWindow:
+    markets: list[Any]
+    next_cursor: str | None
 
 
 @dataclass
@@ -108,6 +117,10 @@ class PaperRunStats:
     nearmiss_considers: int = 0
     edge_histogram: dict[str, int] = field(default_factory=dict)
     watch: list[dict[str, Any]] = field(default_factory=list)
+    list_window: int = 1
+    list_cursor: str | None = None
+    list_wraps: int = 0
+    list_next_queued: bool = False
 
 
 class StreamHeartbeat:
@@ -387,6 +400,10 @@ def write_paper_stats(
         "nearmiss_considers": stats.nearmiss_considers,
         "edge_histogram": dict(stats.edge_histogram),
         "watch": list(stats.watch),
+        "list_window": stats.list_window,
+        "list_cursor": stats.list_cursor,
+        "list_wraps": stats.list_wraps,
+        "list_next_queued": stats.list_next_queued,
         "heartbeat_ms": _now_ms() if now_ms is None else now_ms,
     }
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -427,23 +444,44 @@ def pair_token_ids(pairs: Sequence[UniversePair]) -> list[str]:
     return [token for pair in pairs for token in (pair.yes_token_id, pair.no_token_id)]
 
 
-async def _iter_listed_markets(client: Any, max_markets: int) -> list[Any]:
+def _page_cursor(page: Any) -> str | None:
+    raw = getattr(page, "next_cursor", None)
+    if raw is None:
+        return None
+    text = str(raw).strip()
+    return text or None
+
+
+async def _iter_listed_markets(
+    client: Any,
+    max_markets: int,
+    *,
+    after_cursor: str | None = None,
+) -> ListedWindow:
     """Walk official list_markets pages until exhausted, the user cap, or the safety ceiling.
 
     `page_size` is always LIST_PAGE_SIZE. Do not request one page of
-    `page_size=max_markets`.
+    `page_size=max_markets`. Optional `after_cursor` uses official
+    `from_cursor` — do not invent offset=.
     """
     limit = listing_limit(max_markets)
     try:
         listed = client.list_markets(closed=False, page_size=LIST_PAGE_SIZE)
         if inspect.isawaitable(listed):
             listed = await listed
+        if after_cursor:
+            resume = getattr(listed, "from_cursor", None)
+            if callable(resume):
+                listed = resume(after_cursor)
+                if inspect.isawaitable(listed):
+                    listed = await listed
     except PublicApiError:
         raise
     except Exception as exc:
         raise PublicApiError(f"public API is unreachable: {exc}") from exc
 
     items: list[Any] = []
+    next_cursor: str | None = None
 
     def _take(market: Any) -> bool:
         items.append(market)
@@ -452,26 +490,89 @@ async def _iter_listed_markets(client: Any, max_markets: int) -> list[Any]:
     if callable(getattr(listed, "__aiter__", None)):
         async for page in listed:
             page_items = getattr(page, "items", None)
+            next_cursor = _page_cursor(page)
             if page_items is None:
                 if _take(page):
-                    return items
+                    return ListedWindow(items, next_cursor)
                 continue
             if not page_items:
                 break
             for market in page_items:
                 if _take(market):
-                    return items
-        return items
+                    return ListedWindow(items, next_cursor)
+        return ListedWindow(items, next_cursor)
 
     iter_items = getattr(listed, "iter_items", None)
     if callable(iter_items):
         async for market in iter_items():
             if _take(market):
                 break
-        return items
+        return ListedWindow(items, None)
     if isinstance(listed, list):
-        return listed[:limit]
+        return ListedWindow(listed[:limit], None)
     raise PublicApiError("public API is unreachable: list_markets returned no page")
+
+
+def read_list_cursor_state(data_dir: Path) -> tuple[str | None, int, int]:
+    """Saved official next_cursor, next window number, and wrap count."""
+    path = Path(data_dir) / LIST_CURSOR_FILENAME
+    if not path.is_file():
+        return None, 1, 0
+    try:
+        parsed = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None, 1, 0
+    if not isinstance(parsed, dict):
+        return None, 1, 0
+    raw = parsed.get("cursor")
+    cursor = str(raw).strip() if raw else None
+    if not cursor:
+        cursor = None
+    try:
+        window = max(1, int(parsed.get("window", 1)))
+    except (TypeError, ValueError):
+        window = 1
+    try:
+        wraps = max(0, int(parsed.get("wraps", 0)))
+    except (TypeError, ValueError):
+        wraps = 0
+    return cursor, window, wraps
+
+
+def write_list_cursor_state(
+    data_dir: Path,
+    cursor: str | None,
+    *,
+    window: int,
+    wraps: int,
+) -> None:
+    path = Path(data_dir) / LIST_CURSOR_FILENAME
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "cursor": cursor,
+        "window": max(1, int(window)),
+        "wraps": max(0, int(wraps)),
+    }
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(json.dumps(payload) + "\n", encoding="utf-8")
+    tmp.replace(path)
+
+
+def pairs_ready_from_batch(
+    pairs: Sequence[UniversePair],
+    batch: Sequence[str],
+    store: BookStore,
+) -> list[UniversePair]:
+    """Pairs touched by this batch that now have both YES and NO books."""
+    wanted = {str(token) for token in batch}
+    ready: list[UniversePair] = []
+    for pair in pairs:
+        if pair.yes_token_id not in wanted and pair.no_token_id not in wanted:
+            continue
+        if store.get(pair.yes_token_id) is None or store.get(pair.no_token_id) is None:
+            continue
+        ready.append(pair)
+    return ready
 
 
 def _now_ms() -> int:
@@ -495,6 +596,7 @@ async def fetch_book_batches(
     token_ids: Sequence[str],
     *,
     batch_size: int = BOOK_BATCH_SIZE,
+    concurrency: int = BOOK_FETCH_CONCURRENCY,
     on_ok: Any = None,
     on_fail: Any = None,
     raise_if_all_fail: bool = True,
@@ -503,17 +605,29 @@ async def fetch_book_batches(
 
     Failed batch: call on_fail and continue. PublicApiError only when every
     batch fails (and raise_if_all_fail). Empty token_ids is a no-op.
+    At most `concurrency` get_order_books calls are in flight. Apply on_ok
+    sequentially so stats writes stay single-threaded.
     """
     batches = chunk_ids(token_ids, batch_size)
     if not batches:
         return 0, 0
+    limit = max(1, int(concurrency))
+    sem = asyncio.Semaphore(limit)
+
+    async def _one(batch: list[str]) -> tuple[list[str], Any, BaseException | None]:
+        async with sem:
+            try:
+                books = await _fetch_books(client, batch)
+            except PublicApiError as exc:
+                return batch, None, exc
+            return batch, books, None
+
+    rows = await asyncio.gather(*[_one(batch) for batch in batches])
     ok = 0
     failed = 0
     last_exc: BaseException | None = None
-    for batch in batches:
-        try:
-            books = await _fetch_books(client, batch)
-        except PublicApiError as exc:
+    for batch, books, exc in rows:
+        if exc is not None:
             failed += 1
             last_exc = exc
             if on_fail is not None:
@@ -728,35 +842,67 @@ async def run_paper(
         yes={}, no={}, open_pairs=0, daily_pnl=ledger.daily_pnl, halted=False
     )
     write_pid(data_dir)
+    saved_cursor, saved_window, saved_wraps = read_list_cursor_state(data_dir)
+    stats.list_window = saved_window
+    stats.list_wraps = saved_wraps
+    pairs: list[UniversePair] = []
+    by_token: dict[str, UniversePair] = {}
+    watch_offset = 0
+
+    def ingest_markets(markets: list[Any]) -> list[UniversePair]:
+        kept: list[UniversePair] = []
+        for market in markets:
+            reason = reject_universe(market)
+            if reason is not None:
+                _append_jsonl(
+                    rejects_path,
+                    {
+                        "ts_ms": _now_ms(),
+                        "condition_id": str(getattr(market, "condition_id", "") or ""),
+                        "reason": reason,
+                    },
+                )
+                _bump(stats, reason)
+                continue
+            kept.append(universe_pair(market))
+        return kept
+
+    def replace_pairs(new_pairs: list[UniversePair]) -> None:
+        nonlocal pairs, by_token, watch_offset
+        pairs = new_pairs
+        by_token = {}
+        for pair in new_pairs:
+            by_token[pair.yes_token_id] = pair
+            by_token[pair.no_token_id] = pair
+        watch_offset = 0
+        store.retain(pair_token_ids(new_pairs))
+        live = {pair.condition_id for pair in new_pairs}
+        for cid in list(watch_scores):
+            if cid not in live:
+                del watch_scores[cid]
+
+    def persist_list_cursor(next_cursor: str | None) -> None:
+        stats.list_cursor = next_cursor
+        write_list_cursor_state(
+            data_dir,
+            next_cursor,
+            window=stats.list_window + 1,
+            wraps=stats.list_wraps,
+        )
 
     try:
-        markets = await _iter_listed_markets(client, max_markets)
+        listed_window = await _iter_listed_markets(
+            client, max_markets, after_cursor=saved_cursor
+        )
     except BaseException:
         if recorder is not None:
             recorder.close()
         clear_pid(data_dir)
         raise
-    stats.markets_listed = len(markets)
-    pairs: list[UniversePair] = []
-    by_token: dict[str, UniversePair] = {}
-    for market in markets:
-        reason = reject_universe(market)
-        if reason is not None:
-            _append_jsonl(
-                rejects_path,
-                {
-                    "ts_ms": _now_ms(),
-                    "condition_id": str(getattr(market, "condition_id", "") or ""),
-                    "reason": reason,
-                },
-            )
-            _bump(stats, reason)
-            continue
-        pair = universe_pair(market)
-        pairs.append(pair)
-        by_token[pair.yes_token_id] = pair
-        by_token[pair.no_token_id] = pair
+    stats.markets_listed = len(listed_window.markets)
+    replace_pairs(ingest_markets(listed_window.markets))
     stats.universe = len(pairs)
+    persist_list_cursor(listed_window.next_cursor)
     batch_size = max(1, int(book_batch_size))
     watch_n = max(1, int(watch_pairs))
     rotate_s = float(watch_rotate_s)
@@ -947,43 +1093,61 @@ async def run_paper(
         _bump(stats, "book_batch_failed")
         write_paper_stats(stats_path, stats)
 
-    async def apply_book_batch(books: Any, _batch: list[str]) -> None:
-        now_ms = _now_ms()
-        heartbeat.mark(now_ms)
-        try:
-            _apply_update(store, books, now_ms)
-        except InvalidOperation as exc:
-            payload = books[0] if isinstance(books, (list, tuple)) and books else books
-            token = str(getattr(payload, "token_id", "") or "")
-            _append_jsonl(
-                rejects_path,
-                {
-                    "ts_ms": now_ms,
-                    "token_id": token,
-                    "reason": "invalid_book_update",
-                    "detail": f"{type(exc).__name__}: {exc}"[:200],
-                },
-            )
-            _bump(stats, "invalid_book_update")
+    def make_apply(consider_pairs: list[UniversePair] | None = None) -> Any:
+        async def apply_book_batch(books: Any, batch: list[str]) -> None:
+            now_ms = _now_ms()
+            heartbeat.mark(now_ms)
+            try:
+                _apply_update(store, books, now_ms)
+            except InvalidOperation as exc:
+                payload = books[0] if isinstance(books, (list, tuple)) and books else books
+                token = str(getattr(payload, "token_id", "") or "")
+                _append_jsonl(
+                    rejects_path,
+                    {
+                        "ts_ms": now_ms,
+                        "token_id": token,
+                        "reason": "invalid_book_update",
+                        "detail": f"{type(exc).__name__}: {exc}"[:200],
+                    },
+                )
+                _bump(stats, "invalid_book_update")
+                write_paper_stats(stats_path, stats)
+                return
+            targets = consider_pairs if consider_pairs is not None else pairs
+            for pair in pairs_ready_from_batch(targets, batch, store):
+                if pair.condition_id in watch_ids():
+                    record_pair_books(pair)
+                await consider(pair)
+            refresh_watch_board()
             write_paper_stats(stats_path, stats)
-            return
-        for pair in pairs:
-            if pair.condition_id in watch_ids():
-                record_pair_books(pair)
-            await consider(pair)
-        refresh_watch_board()
-        write_paper_stats(stats_path, stats)
 
-    if all_token_ids:
-        try:
+        return apply_book_batch
+
+    apply_book_batch = make_apply()
+
+    async def snapshot_current(*, raise_if_all_fail: bool) -> None:
+        tokens = pair_token_ids(pairs)
+        if not tokens:
+            return
+        watch_set = set(pair_token_ids(current_watch_pairs()))
+        first = [token for token in tokens if token in watch_set]
+        rest = [token for token in tokens if token not in watch_set]
+        for chunk in (first, rest):
+            if not chunk:
+                continue
             await fetch_book_batches(
                 client,
-                all_token_ids,
+                chunk,
                 batch_size=batch_size,
                 on_ok=apply_book_batch,
                 on_fail=log_batch_fail,
-                raise_if_all_fail=True,
+                raise_if_all_fail=raise_if_all_fail,
             )
+
+    if all_token_ids:
+        try:
+            await snapshot_current(raise_if_all_fail=True)
         except BaseException:
             if recorder is not None:
                 recorder.close()
@@ -1054,6 +1218,31 @@ async def run_paper(
                 record_pair_books(pair)
             await consider(pair)
 
+    async def rest_probe_watch() -> int:
+        probe_ok = 0
+        probe_timeout_s = max(0.05, settings.ws_stale_ms / 1000)
+
+        async def probe_ok_batch(books: Any, _batch: list[str]) -> None:
+            nonlocal probe_ok
+            probe_ok += 1
+            await handle_update(books)
+
+        async def probe_one(batch: list[str]) -> None:
+            try:
+                books = await asyncio.wait_for(
+                    _fetch_books(client, batch),
+                    timeout=probe_timeout_s,
+                )
+            except (PublicApiError, TimeoutError, asyncio.TimeoutError) as exc:
+                await log_batch_fail(batch, exc)
+                return
+            await probe_ok_batch(books, batch)
+
+        for batch in chunk_ids(current_watch_tokens(), batch_size):
+            await probe_one(batch)
+            write_paper_stats(stats_path, stats)
+        return probe_ok
+
     async def consume_slice() -> None:
         tokens = current_watch_tokens()
         try:
@@ -1072,28 +1261,42 @@ async def run_paper(
         except PublicApiError:
             trip_dead_stream()
             return
-        if time.monotonic() < deadline:
+        if time.monotonic() >= deadline:
+            return
+        if await rest_probe_watch() == 0:
             trip_dead_stream()
 
-    async def consume() -> None:
+    async def consume(prefetch: asyncio.Task[Any] | None = None) -> str:
         while time.monotonic() < deadline:
+            if prefetch is not None and prefetch.done():
+                return "swap"
             rotated.clear()
             slice_task = asyncio.create_task(consume_slice())
             rotate_wait = asyncio.create_task(rotated.wait())
             remaining = deadline - time.monotonic()
+            wait_for = {slice_task, rotate_wait}
+            if prefetch is not None:
+                wait_for.add(prefetch)
             done, pending = await asyncio.wait(
-                {slice_task, rotate_wait},
+                wait_for,
                 timeout=max(0.0, remaining),
                 return_when=asyncio.FIRST_COMPLETED,
             )
             for task in pending:
+                if prefetch is not None and task is prefetch:
+                    continue
                 task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
                     await task
+            if prefetch is not None and prefetch in done:
+                return "swap"
             if slice_task in done and not slice_task.cancelled():
-                return
+                if not kill.allow_new_intents():
+                    return "halt"
+                continue
             if not done:
-                return
+                return "deadline"
+        return "deadline"
 
     async def rotate_watch() -> None:
         nonlocal watch_offset
@@ -1144,7 +1347,6 @@ async def run_paper(
 
     async def watch_silence() -> None:
         interval_s = max(0.02, min(poll_s, settings.ws_stale_ms / 1000))
-        probe_timeout_s = max(0.05, settings.ws_stale_ms / 1000)
         while True:
             await asyncio.sleep(interval_s)
             now_ms = _now_ms()
@@ -1159,28 +1361,7 @@ async def run_paper(
             if stream_liveness_probe_due(
                 age_ms=age, ws_stale_ms=settings.ws_stale_ms
             ):
-                probe_ok = 0
-
-                async def probe_ok_batch(books: Any, _batch: list[str]) -> None:
-                    nonlocal probe_ok
-                    probe_ok += 1
-                    await handle_update(books)
-
-                async def probe_one(batch: list[str]) -> None:
-                    try:
-                        books = await asyncio.wait_for(
-                            _fetch_books(client, batch),
-                            timeout=probe_timeout_s,
-                        )
-                    except (PublicApiError, TimeoutError, asyncio.TimeoutError) as exc:
-                        await log_batch_fail(batch, exc)
-                        return
-                    await probe_ok_batch(books, batch)
-
-                for batch in chunk_ids(current_watch_tokens(), batch_size):
-                    await probe_one(batch)
-                    write_paper_stats(stats_path, stats)
-                if probe_ok == 0:
+                if await rest_probe_watch() == 0:
                     trip_dead_stream()
                 continue
             kill.evaluate(
@@ -1189,35 +1370,105 @@ async def run_paper(
                 now_ms=now_ms,
             )
 
-    watch = asyncio.create_task(watch_silence())
-    rotator = asyncio.create_task(rotate_watch())
-    try:
-        remaining = deadline - time.monotonic()
-        finished_on_timeout = False
-        if remaining > 0:
+    async def prepare_next_window(after_cursor: str | None) -> Any:
+        try:
+            window = await _iter_listed_markets(
+                client, max_markets, after_cursor=after_cursor
+            )
+        except PublicApiError:
+            return None
+        new_pairs = ingest_markets(window.markets)
+        tokens = pair_token_ids(new_pairs)
+        if tokens:
+            await fetch_book_batches(
+                client,
+                tokens,
+                batch_size=batch_size,
+                on_ok=make_apply(new_pairs),
+                on_fail=log_batch_fail,
+                raise_if_all_fail=False,
+            )
+        return window, new_pairs
+
+    async def run_watch(prefetch: asyncio.Task[Any] | None) -> str:
+        watch = asyncio.create_task(watch_silence())
+        rotator = asyncio.create_task(rotate_watch())
+        reason = "deadline"
+        try:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return "deadline"
             try:
-                await asyncio.wait_for(consume(), timeout=remaining)
+                reason = await asyncio.wait_for(
+                    consume(prefetch), timeout=remaining
+                )
             except asyncio.TimeoutError:
-                finished_on_timeout = True
-        now_ms = _now_ms()
-        # Planned window end is not a dead socket. watch_silence already
-        # probed; do not race an in-flight REST poll into a false ws_stale.
-        kill.evaluate(
-            daily_pnl=portfolio.daily_pnl,
-            ws_age_ms=0 if finished_on_timeout else heartbeat.age_ms(now_ms),
-            now_ms=now_ms,
-        )
+                reason = "deadline"
+            return reason
+        finally:
+            rotator.cancel()
+            watch.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await rotator
+            with contextlib.suppress(asyncio.CancelledError):
+                await watch
+
+    next_after = listed_window.next_cursor
+    try:
+        while time.monotonic() < deadline:
+            refresh_watch_board()
+            prefetch = None
+            if next_after is not None:
+                stats.list_next_queued = True
+                write_paper_stats(stats_path, stats)
+                prefetch = asyncio.create_task(prepare_next_window(next_after))
+            else:
+                stats.list_next_queued = False
+                write_paper_stats(stats_path, stats)
+            reason = await run_watch(prefetch)
+            prepared = None
+            if prefetch is not None:
+                if prefetch.done() and not prefetch.cancelled():
+                    with contextlib.suppress(Exception):
+                        prepared = prefetch.result()
+                else:
+                    prefetch.cancel()
+                    with contextlib.suppress(asyncio.CancelledError, Exception):
+                        await prefetch
+            if (
+                reason == "swap"
+                and prepared is not None
+                and time.monotonic() < deadline
+            ):
+                window, new_pairs = prepared
+                new_ids = {pair.condition_id for pair in new_pairs}
+                old_ids = {pair.condition_id for pair in pairs}
+                if new_ids == old_ids and window.next_cursor is None:
+                    break
+                if next_after is None:
+                    stats.list_wraps += 1
+                stats.list_window += 1
+                replace_pairs(new_pairs)
+                stats.markets_listed = len(window.markets)
+                stats.universe = len(pairs)
+                persist_list_cursor(window.next_cursor)
+                next_after = window.next_cursor
+                stats.list_next_queued = False
+                continue
+            now_ms = _now_ms()
+            clean_end = reason == "deadline" or time.monotonic() >= deadline
+            kill.evaluate(
+                daily_pnl=portfolio.daily_pnl,
+                ws_age_ms=0 if clean_end else heartbeat.age_ms(now_ms),
+                now_ms=now_ms,
+            )
+            break
     finally:
-        rotator.cancel()
-        watch.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await rotator
-        with contextlib.suppress(asyncio.CancelledError):
-            await watch
         await expire_rests(force_timeout=True)
         if recorder is not None:
             recorder.close()
         clear_pid(data_dir)
     _sync_tracker_stats(stats, tracker)
+    stats.list_next_queued = False
     write_paper_stats(stats_path, stats)
     return stats

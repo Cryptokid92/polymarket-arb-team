@@ -61,7 +61,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=20,
         help=(
             "Max listed markets to scan (default 20). "
-            "0 = no user cap; still stops at the documented safety ceiling "
+            "0 = no user cap; still windows at the documented safety ceiling "
             f"({LIST_SAFETY_CAP})."
         ),
     )
@@ -69,8 +69,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--all-markets",
         action="store_true",
         help=(
-            "List every open market (same as --max-markets 0). "
-            f"Safety ceiling {LIST_SAFETY_CAP}. Universe filter still applies. "
+            "List open markets in official-cursor windows (same as --max-markets 0). "
+            f"Window size {LIST_SAFETY_CAP}. Universe filter still applies. "
             f"REST books are batched ({BOOK_BATCH_SIZE} token ids). "
             f"Watch first {WATCH_PAIRS} pairs; rotate every {WATCH_ROTATE_S}s."
         ),
