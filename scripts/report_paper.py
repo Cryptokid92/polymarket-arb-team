@@ -105,8 +105,12 @@ def summarize_paper(data_dir: Path) -> dict:
         "closest_condition_id": snapshot.get("closest_condition_id"),
         "closest_fillable": snapshot.get("closest_fillable"),
         "closest_in_watch": snapshot.get("closest_in_watch"),
+        "closest_book_age_ms": snapshot.get("closest_book_age_ms"),
         "nearmiss_considers": snapshot.get("nearmiss_considers", 0),
         "edge_histogram": snapshot.get("edge_histogram") or {},
+        "max_edge_window": snapshot.get("max_edge_window"),
+        "edge_thresholds": snapshot.get("edge_thresholds") or {},
+        "maker_quotes": snapshot.get("maker_quotes", 0),
         "completed_pairs": completed,
         "naked_incidents": naked,
     }
@@ -116,15 +120,18 @@ def format_report(stats: dict) -> str:
     lines = [
         "paper report",
         f"  gaps seen: {stats['gaps_seen']}",
+        f"  maker quotes: {stats.get('maker_quotes', 0)}",
         f"  intents approved: {stats['intents_approved']}",
         f"  completed pairs: {stats.get('completed_pairs', 0)}",
         f"  naked incidents: {stats.get('naked_incidents', 0)}",
         f"  estimated maker EV: {stats['estimated_maker_ev']}",
         f"  estimated taker EV: {stats['estimated_taker_ev']}",
         f"  best edge this hour: {stats.get('best_edge')}",
+        f"  max edge this window: {stats.get('max_edge_window')}",
         f"  closest pair: {stats.get('closest_condition_id')}",
         f"  closest fillable: {stats.get('closest_fillable')}",
         f"  closest in watch: {stats.get('closest_in_watch')}",
+        f"  closest book age ms: {stats.get('closest_book_age_ms')}",
         f"  near-miss considers: {stats.get('nearmiss_considers', 0)}",
         "  reject reasons:",
     ]
@@ -144,6 +151,13 @@ def format_report(stats: dict) -> str:
     else:
         for bucket, count in sorted(histogram.items()):
             lines.append(f"    {bucket}: {count}")
+    thresholds = stats.get("edge_thresholds") or {}
+    lines.append("  edge thresholds:")
+    if not thresholds:
+        lines.append("    (none)")
+    else:
+        for key in ("gt_-0.005", "gt_-0.002", "gt_0", "gte_0.01"):
+            lines.append(f"    {key}: {thresholds.get(key, 0)}")
     return "\n".join(lines)
 
 

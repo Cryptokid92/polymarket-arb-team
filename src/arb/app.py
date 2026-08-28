@@ -7,6 +7,7 @@ import contextlib
 import inspect
 import json
 import re
+import threading
 import time
 from collections.abc import AsyncIterator, Sequence
 from dataclasses import dataclass, field
@@ -22,6 +23,7 @@ from arb.fee_agent import MarketFees, choose_intent
 from arb.fees import net_edge_maker, net_edge_taker, pair_taker_fees
 from arb.hunter import hunt
 from arb.killswitch import KillSwitch
+from arb.maker import gap_from_maker_quotes, maker_complete_quotes
 from arb.messages import GapFound, Intent
 from arb.nearmiss import NearMiss, NearMissTracker, measure_pair
 from arb.paper_control import (
@@ -82,6 +84,7 @@ class PipelineTrace:
     maker_ev: Decimal | None
     taker_ev: Decimal | None
     near_miss: NearMiss | None = None
+    source: str | None = None
 
 
 @dataclass
@@ -122,6 +125,9 @@ class PaperRunStats:
     closest_thin: bool | None = None
     nearmiss_considers: int = 0
     edge_histogram: dict[str, int] = field(default_factory=dict)
+    max_edge_window: Decimal | None = None
+    edge_thresholds: dict[str, int] = field(default_factory=dict)
+    maker_quotes: int = 0
     watch: list[dict[str, Any]] = field(default_factory=list)
     list_window: int = 1
     list_cursor: str | None = None
@@ -221,6 +227,7 @@ def run_pipeline_traced(
     *,
     in_watch: bool = False,
     condition_id: str | None = None,
+    window_id: int = 1,
 ) -> PipelineTrace:
     min_size = (
         yes.min_order_size
@@ -236,21 +243,41 @@ def run_pipeline_traced(
         now_ms,
         condition_id=cid,
         in_watch=in_watch,
+        window_id=window_id,
     )
     gap = hunt(yes, no, settings.min_edge, min_size, _MAX_SHARES, now_ms)
+    source: str | None = None
+    if gap is not None:
+        source = "taker"
+    else:
+        quotes = maker_complete_quotes(
+            yes,
+            no,
+            min_edge=settings.min_edge,
+            max_gap=settings.max_gap,
+            min_size=min_size,
+            max_notional=settings.max_notional_per_trade,
+            stale_ms=settings.stale_ms,
+            now_ms=now_ms,
+        )
+        if quotes is not None:
+            gap = gap_from_maker_quotes(yes, no, quotes, now_ms, cid)
+            source = "maker"
     if gap is None:
-        return PipelineTrace(None, None, None, None, None, near)
+        return PipelineTrace(None, None, None, None, None, near, None)
     maker_ev, taker_ev = _estimate_ev(gap, fees)
     reason = _approve_reject_reason(gap, portfolio, settings, market_flags)
     if reason is not None:
-        return PipelineTrace(gap, None, reason, maker_ev, taker_ev, near)
+        return PipelineTrace(gap, None, reason, maker_ev, taker_ev, near, source)
     approved = approve(gap, portfolio, settings, market_flags)
     if approved is None:
-        return PipelineTrace(gap, None, "risk_rejected", maker_ev, taker_ev, near)
+        return PipelineTrace(gap, None, "risk_rejected", maker_ev, taker_ev, near, source)
     intent = choose_intent(approved, fees, settings.min_edge)
     if intent is None:
-        return PipelineTrace(approved, None, "fee_ev_nonpositive", maker_ev, taker_ev, near)
-    return PipelineTrace(approved, intent, None, maker_ev, taker_ev, near)
+        return PipelineTrace(
+            approved, None, "fee_ev_nonpositive", maker_ev, taker_ev, near, source
+        )
+    return PipelineTrace(approved, intent, None, maker_ev, taker_ev, near, source)
 
 
 async def paper_execute(
@@ -441,6 +468,11 @@ def write_paper_stats(
         "closest_thin": stats.closest_thin,
         "nearmiss_considers": stats.nearmiss_considers,
         "edge_histogram": dict(stats.edge_histogram),
+        "max_edge_window": (
+            str(stats.max_edge_window) if stats.max_edge_window is not None else None
+        ),
+        "edge_thresholds": dict(stats.edge_thresholds),
+        "maker_quotes": stats.maker_quotes,
         "watch": list(stats.watch),
         "list_window": stats.list_window,
         "list_cursor": stats.list_cursor,
@@ -797,6 +829,10 @@ def _sync_tracker_stats(stats: PaperRunStats, tracker: NearMissTracker) -> None:
     stats.nearmiss_considers = int(snap["nearmiss_considers"])
     hist = snap["edge_histogram"]
     stats.edge_histogram = dict(hist) if isinstance(hist, dict) else {}
+    raw_window = snap.get("max_edge_window")
+    stats.max_edge_window = Decimal(str(raw_window)) if raw_window is not None else None
+    thresholds = snap.get("edge_thresholds")
+    stats.edge_thresholds = dict(thresholds) if isinstance(thresholds, dict) else {}
 
 
 def _nearmiss_row(miss: NearMiss, now_ms: int) -> dict[str, Any]:
@@ -810,6 +846,7 @@ def _nearmiss_row(miss: NearMiss, now_ms: int) -> dict[str, Any]:
         "book_age_ms": miss.book_age_ms,
         "in_watch": miss.in_watch,
         "thin": miss.thin,
+        "window_id": miss.window_id,
     }
 
 
@@ -861,9 +898,16 @@ async def run_paper(
     rejects_path = data_dir / "rejects.jsonl"
     fills_path = data_dir / "fills.jsonl"
     nearmiss_path = data_dir / "nearmiss.jsonl"
+    maker_quotes_path = data_dir / "maker_quotes.jsonl"
     alerts_path = data_dir / "alerts.jsonl"
     stats_path = data_dir / "stats.json"
     stats = PaperRunStats()
+    stats_io = threading.Lock()
+
+    def persist_stats() -> None:
+        with stats_io:
+            write_paper_stats(stats_path, stats)
+
     stats.list_window_s = max(0, int(list_window_s))
     store = BookStore()
     heartbeat = StreamHeartbeat()
@@ -914,6 +958,7 @@ async def run_paper(
     saved_cursor, saved_window, saved_wraps = read_list_cursor_state(data_dir)
     stats.list_window = saved_window
     stats.list_wraps = saved_wraps
+    tracker.set_window(stats.list_window)
     seen = load_seen_markets(data_dir)
     seen.apply_to(stats)
     last_saved_walked = seen.walked_unique
@@ -1030,7 +1075,7 @@ async def run_paper(
         )
 
     refresh_watch_board()
-    write_paper_stats(stats_path, stats)
+    persist_stats()
 
     def current_watch_tokens() -> list[str]:
         return pair_token_ids(current_watch_pairs())
@@ -1076,11 +1121,11 @@ async def run_paper(
             apply_settled_fill(fill, _now_ms())
         stats.bankroll = ledger.bankroll
         stats.daily_pnl = ledger.daily_pnl
-        write_paper_stats(stats_path, stats)
+        persist_stats()
 
     async def consider(pair: UniversePair) -> None:
         if read_control(data_dir).paused:
-            write_paper_stats(stats_path, stats)
+            persist_stats()
             return
         yes = store.get(pair.yes_token_id)
         no = store.get(pair.no_token_id)
@@ -1098,6 +1143,7 @@ async def run_paper(
             now_ms=now_ms,
         )
         portfolio.halted = not kill.allow_new_intents()
+        portfolio.open_pairs = ledger.resting_pairs
         trace = run_pipeline_traced(
             yes,
             no,
@@ -1108,6 +1154,7 @@ async def run_paper(
             now_ms,
             in_watch=in_watch,
             condition_id=pair.condition_id,
+            window_id=stats.list_window,
         )
         if trace.near_miss is not None:
             miss = trace.near_miss
@@ -1115,7 +1162,7 @@ async def run_paper(
             if tracker.observe(miss):
                 _append_jsonl(nearmiss_path, _nearmiss_row(miss, now_ms))
             _sync_tracker_stats(stats, tracker)
-        if trace.gap is not None:
+        if trace.gap is not None and trace.source == "taker":
             stats.gaps += 1
             _append_jsonl(
                 gaps_path,
@@ -1130,6 +1177,26 @@ async def run_paper(
                     "maker_ev": str(trace.maker_ev) if trace.maker_ev is not None else None,
                     "taker_ev": str(trace.taker_ev) if trace.taker_ev is not None else None,
                     "reject_reason": trace.reject_reason,
+                    "source": "taker",
+                },
+            )
+        if trace.gap is not None and trace.source == "maker":
+            stats.maker_quotes += 1
+            _append_jsonl(
+                maker_quotes_path,
+                {
+                    "ts_ms": now_ms,
+                    "condition_id": pair.condition_id,
+                    "raw_edge": str(trace.gap.raw_edge),
+                    "yes_vwap": str(trace.gap.yes_vwap),
+                    "no_vwap": str(trace.gap.no_vwap),
+                    "fillable_shares": str(trace.gap.fillable_shares),
+                    "book_age_ms": trace.gap.book_age_ms,
+                    "maker_ev": str(trace.maker_ev) if trace.maker_ev is not None else None,
+                    "window_id": stats.list_window,
+                    "in_watch": in_watch,
+                    "reject_reason": trace.reject_reason,
+                    "source": "maker",
                 },
             )
         if trace.reject_reason:
@@ -1142,7 +1209,7 @@ async def run_paper(
                 },
             )
             _bump(stats, trace.reject_reason)
-        if trace.intent is not None:
+        if trace.intent is not None and not ledger.has_rest(pair.condition_id):
             fill = await ledger.try_fill(
                 trace.intent, pair.fees, now_ms, mode="paper", yes=yes, no=no
             )
@@ -1167,11 +1234,12 @@ async def run_paper(
                 apply_settled_fill(fill, now_ms)
         for settled in await ledger.poll_rests(store, now_ms):
             apply_settled_fill(settled, now_ms)
+        portfolio.open_pairs = ledger.resting_pairs
         stats.bankroll = ledger.bankroll
         stats.daily_pnl = ledger.daily_pnl
         _sync_tracker_stats(stats, tracker)
         refresh_watch_board()
-        write_paper_stats(stats_path, stats)
+        persist_stats()
 
     all_token_ids = pair_token_ids(pairs)
 
@@ -1187,7 +1255,7 @@ async def run_paper(
             },
         )
         _bump(stats, "book_batch_failed")
-        write_paper_stats(stats_path, stats)
+        persist_stats()
 
     def make_apply(consider_pairs: list[UniversePair] | None = None) -> Any:
         async def apply_book_batch(books: Any, batch: list[str]) -> None:
@@ -1208,7 +1276,7 @@ async def run_paper(
                     },
                 )
                 _bump(stats, "invalid_book_update")
-                write_paper_stats(stats_path, stats)
+                persist_stats()
                 return
             targets = consider_pairs if consider_pairs is not None else pairs
             for pair in pairs_ready_from_batch(targets, batch, store):
@@ -1216,7 +1284,7 @@ async def run_paper(
                     record_pair_books(pair)
                 await consider(pair)
             refresh_watch_board()
-            write_paper_stats(stats_path, stats)
+            persist_stats()
 
         return apply_book_batch
 
@@ -1256,7 +1324,7 @@ async def run_paper(
         _sync_tracker_stats(stats, tracker)
         refresh_watch_board()
         persist_seen(force=True)
-        write_paper_stats(stats_path, stats)
+        persist_stats()
         if recorder is not None:
             recorder.close()
         clear_pid(data_dir)
@@ -1266,7 +1334,7 @@ async def run_paper(
     rotated = asyncio.Event()
 
     refresh_watch_board()
-    write_paper_stats(stats_path, stats)
+    persist_stats()
 
     def trip_dead_stream() -> None:
         """Persist ws_stale. Never auto-resumes."""
@@ -1305,7 +1373,7 @@ async def run_paper(
                 },
             )
             _bump(stats, "invalid_book_update")
-            write_paper_stats(stats_path, stats)
+            persist_stats()
             return
         seen: set[str] = set()
         if isinstance(update, (list, tuple)):
@@ -1349,7 +1417,7 @@ async def run_paper(
 
         for batch in chunk_ids(current_watch_tokens(), batch_size):
             await probe_one(batch)
-            write_paper_stats(stats_path, stats)
+            persist_stats()
         return probe_ok
 
     async def consume_slice() -> None:
@@ -1414,7 +1482,7 @@ async def run_paper(
             return
         while True:
             if read_control(data_dir).paused:
-                write_paper_stats(stats_path, stats)
+                persist_stats()
                 await asyncio.sleep(min(0.25, poll_s if poll_s > 0 else 0.25))
                 continue
             target = effective_rotate_s(data_dir, rotate_s)
@@ -1455,7 +1523,7 @@ async def run_paper(
                     raise_if_all_fail=False,
                 )
             refresh_watch_board()
-            write_paper_stats(stats_path, stats)
+            persist_stats()
             rotated.set()
 
     async def watch_silence() -> None:
@@ -1488,7 +1556,7 @@ async def run_paper(
     def listing_progress(n: int) -> None:
         if window_until > 0:
             stats.list_hold_s = max(0.0, window_until - time.monotonic())
-        write_paper_stats(stats_path, stats)
+        persist_stats()
 
     async def prepare_next_window(after_cursor: str | None) -> Any:
         try:
@@ -1504,6 +1572,29 @@ async def run_paper(
         # List+ingest only. A full-universe REST snapshot here never
         # finished under 1s rotate, so unique walked froze on one window.
         return window, new_pairs
+
+    async def walk_watch_while_listing() -> None:
+        """REST-walk the current watch slice while the next 5000 lists."""
+        while True:
+            tokens = current_watch_tokens()
+            watched = current_watch_pairs()
+            if tokens:
+                await fetch_book_batches(
+                    client,
+                    tokens,
+                    batch_size=batch_size,
+                    on_ok=make_apply(watched),
+                    on_fail=log_batch_fail,
+                    raise_if_all_fail=False,
+                )
+            await asyncio.sleep(0)
+
+    async def prepare_next_keeping_watch(after_cursor: str | None) -> Any:
+        walker = asyncio.create_task(walk_watch_while_listing())
+        try:
+            return await prepare_next_window(after_cursor)
+        finally:
+            await _abandon_task(walker)
 
     async def run_watch_until(stop_at: float) -> str:
         watch = asyncio.create_task(watch_silence())
@@ -1546,11 +1637,11 @@ async def run_paper(
             )
             stats.list_next_queued = True
             stats.list_hold_s = max(0.0, window_until - time.monotonic())
-            write_paper_stats(stats_path, stats)
+            persist_stats()
             # List the next 5000 while the websocket is down so official
             # pages are not starved by subscribe / 1s rotate REST.
             # after_cursor=None wraps to the start of the catalog.
-            prepared = await prepare_next_window(next_after)
+            prepared = await prepare_next_keeping_watch(next_after)
             stats.list_next_queued = False
             stop_at = (
                 time.monotonic()
@@ -1558,7 +1649,7 @@ async def run_paper(
                 else window_until
             )
             stats.list_hold_s = max(0.0, stop_at - time.monotonic())
-            write_paper_stats(stats_path, stats)
+            persist_stats()
             reason = await run_watch_until(stop_at)
             stats.list_hold_s = 0
             if time.monotonic() >= deadline or reason == "deadline":
@@ -1589,11 +1680,12 @@ async def run_paper(
                     persist_list_cursor(window.next_cursor)
                     persist_seen(force=True)
                     refresh_watch_board()
-                    write_paper_stats(stats_path, stats)
+                    persist_stats()
                 break
             if next_after is None:
                 stats.list_wraps += 1
             stats.list_window += 1
+            tracker.set_window(stats.list_window)
             stats.markets_listed = len(window.markets)
             persist_list_cursor(window.next_cursor)
             next_after = window.next_cursor
@@ -1604,11 +1696,11 @@ async def run_paper(
                 # watch slice and list the next 5000 immediately.
                 stats.list_empty_windows += 1
                 refresh_watch_board()
-                write_paper_stats(stats_path, stats)
+                persist_stats()
                 continue
             replace_pairs(new_pairs)
             stats.universe = len(pairs)
-            write_paper_stats(stats_path, stats)
+            persist_stats()
             await snapshot_current(raise_if_all_fail=False)
             window_started = time.monotonic()
             window_until = (
@@ -1623,5 +1715,5 @@ async def run_paper(
     _sync_tracker_stats(stats, tracker)
     stats.list_next_queued = False
     persist_seen(force=True)
-    write_paper_stats(stats_path, stats)
+    persist_stats()
     return stats

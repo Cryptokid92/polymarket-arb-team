@@ -155,6 +155,10 @@ def test_tracker_best_ignores_thin_and_logs_nonnegative() -> None:
     assert snap["edge_histogram"]["none"] == 1
     assert snap["edge_histogram"]["0_0.005"] == 1
     assert snap["edge_histogram"]["gte_0.02"] == 1
+    assert snap["edge_thresholds"]["gt_-0.005"] == 2
+    assert snap["edge_thresholds"]["gt_0"] == 1
+    assert snap["edge_thresholds"]["gte_0.01"] == 1
+    assert snap["max_edge_window"] == "0.03"
 
 
 def test_edge_bucket_and_log_rule() -> None:
@@ -173,6 +177,32 @@ def test_edge_bucket_and_log_rule() -> None:
         in_watch=True,
     )
     assert should_log_nearmiss(miss, is_new_best=False) is True
+
+
+def test_tracker_thresholds_and_window_max_reset() -> None:
+    yes_flat, no_flat, payload_flat = _load_pair("no_gap.json")
+    tracker = NearMissTracker()
+    tracker.set_window(2)
+    miss = measure_pair(
+        yes_flat,
+        no_flat,
+        yes_flat.min_order_size,
+        d(payload_flat["max_shares"]),
+        1000,
+        condition_id="flat",
+        in_watch=True,
+        window_id=2,
+    )
+    assert miss.window_id == 2
+    tracker.observe(miss)
+    assert tracker.window_id == 2
+    assert tracker.max_edge_window == Decimal("0")
+    assert tracker.threshold_counts["gt_-0.005"] == 1
+    assert tracker.threshold_counts["gt_0"] == 0
+    assert tracker.threshold_counts["gte_0.01"] == 0
+    tracker.set_window(3)
+    assert tracker.max_edge_window is None
+    assert tracker.window_id == 3
 
 
 def test_pipeline_trace_includes_near_miss_when_hunt_is_silent() -> None:
@@ -195,10 +225,13 @@ def test_pipeline_trace_includes_near_miss_when_hunt_is_silent() -> None:
     trace = run_pipeline_traced(
         yes, no, settings, flags, MarketFees(yes_rate=d("0"), no_rate=d("0")), portfolio, 1000
     )
-    assert trace.gap is None
-    assert trace.intent is None
+    assert hunt(yes, no, MIN_EDGE, yes.min_order_size, d("50"), now_ms=1000) is None
     assert trace.near_miss is not None
     assert trace.near_miss.raw_edge == Decimal("0")
+    assert trace.source == "maker"
+    assert trace.gap is not None
+    assert trace.intent is not None
+    assert trace.intent.path == "maker_gtc"
 
 
 def test_nearmiss_does_not_loosen_caps() -> None:

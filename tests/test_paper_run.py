@@ -1362,6 +1362,7 @@ def test_report_paper_prints_stats(tmp_path: Path) -> None:
     assert "gaps seen: 1" in text
     assert "intents approved: 1" in text
     assert "best edge this hour" in text
+    assert "maker quotes" in text
     assert "estimated maker EV" in text
     assert "estimated taker EV" in text
     assert "stale: 2" in text
@@ -1406,6 +1407,9 @@ async def test_paper_run_writes_nearmiss_alerts_and_books(tmp_path: Path) -> Non
     assert (data_dir / "books.jsonl").is_file()
     near = json.loads((data_dir / "nearmiss.jsonl").read_text(encoding="utf-8").splitlines()[0])
     assert near["raw_edge"] == "0.03"
+    assert near["window_id"] == 1
+    assert "book_age_ms" in near
+    assert "in_watch" in near
     alert = json.loads((data_dir / "alerts.jsonl").read_text(encoding="utf-8").splitlines()[0])
     assert alert["path"] in {"maker_gtc", "taker_fak"}
     snapshot = json.loads((data_dir / "stats.json").read_text(encoding="utf-8"))
@@ -1431,10 +1435,15 @@ async def test_paper_run_near_miss_when_hunt_is_silent(tmp_path: Path) -> None:
         once=True,
     )
     assert stats.gaps == 0
-    assert stats.intents == 0
+    assert stats.maker_quotes >= 1
+    assert stats.intents >= 1
     assert stats.nearmiss_considers >= 1
     assert stats.best_edge == Decimal("0")
     assert stats.edge_histogram.get("0_0.005", 0) >= 1
+    assert stats.edge_thresholds.get("gt_-0.005", 0) >= 1
+    snapshot = json.loads((data_dir / "stats.json").read_text(encoding="utf-8"))
+    assert snapshot["maker_quotes"] >= 1
+    assert Decimal(str(snapshot["max_edge_window"])) == Decimal("0")
 
 
 @pytest.mark.asyncio
@@ -1826,6 +1835,73 @@ async def test_list_hold_is_written_before_next_window_lists(
     )
     assert holds
     assert max(holds) > 0
+
+
+@pytest.mark.asyncio
+async def test_watch_slice_considered_while_next_window_lists(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("arb.app.LIST_SAFETY_CAP", 2)
+    walks_during_list = []
+
+    class _SlowNext(_PagedPublic):
+        listing_next = False
+
+        def list_markets(self, *, closed: bool = False, page_size: int = 20, **kwargs):
+            self.list_calls += 1
+            self.list_kwargs = {"closed": closed, "page_size": page_size, **kwargs}
+            if self.list_calls >= 2:
+                self.listing_next = True
+
+                class _SlowPages(_PagedPaginator):
+                    def from_cursor(inner_self, cursor: str) -> _PagedPaginator:
+                        nxt = super().from_cursor(cursor)
+                        return _SlowPages(nxt._pages, start=nxt._start)
+
+                    async def _iter_pages(inner_self):
+                        await asyncio.sleep(0.08)
+                        async for page in super()._iter_pages():
+                            await asyncio.sleep(0.02)
+                            yield page
+
+                self.paginator = _SlowPages(self.pages)
+                return self.paginator
+            self.paginator = _PagedPaginator(self.pages)
+            return self.paginator
+
+        async def get_order_books(self, *, token_ids: list[str]):
+            self.book_call_ids.append(list(token_ids))
+            self.book_token_ids.extend(token_ids)
+            if self.listing_next:
+                walks_during_list.append(list(token_ids))
+            books = _two_window_books()
+            return [books[tid] for tid in token_ids if tid in books]
+
+        def subscribe(self, token_ids: list[str]):
+            self.subscribe_calls.append(list(token_ids))
+            return _keep_subscribe_open([])
+
+    client = _SlowNext(_two_window_pages())
+    stats = await run_paper(
+        client=client,
+        settings=_settings(),
+        project_root=tmp_path,
+        data_dir=tmp_path / "paper",
+        max_markets=0,
+        once=False,
+        seconds=0.45,
+        poll_s=0.05,
+        watch_rotate_s=0,
+        list_window_s=1,
+    )
+    assert walks_during_list
+    assert stats.nearmiss_considers >= 1
+    assert {token for batch in walks_during_list for token in batch} <= {
+        "ya",
+        "na",
+        "yb",
+        "nb",
+    }
 
 
 @pytest.mark.asyncio

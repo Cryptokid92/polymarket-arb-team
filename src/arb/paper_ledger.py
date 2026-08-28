@@ -114,6 +114,13 @@ class PaperLedger:
         self._rng = _MissRng(int(rng_seed))
         self._rests: list[RestingPair] = []
 
+    def has_rest(self, condition_id: str) -> bool:
+        return any(rest.intent.gap.condition_id == condition_id for rest in self._rests)
+
+    @property
+    def resting_pairs(self) -> int:
+        return len(self._rests)
+
     def _rejected(
         self,
         intent: Intent,

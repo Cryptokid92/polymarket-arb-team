@@ -375,8 +375,11 @@ def summarize_dashboard(
     list_hold_s = 0
     list_empty_windows = 0
     best_edge = None
+    max_edge_window = None
+    maker_quotes = 0
     closest: dict[str, Any] | None = None
     edge_histogram: dict[str, Any] = {}
+    edge_thresholds: dict[str, Any] = {}
     if stats is not None:
         markets_listed = _int_or_zero(stats.get("markets_listed"))
         universe = _int_or_zero(stats.get("universe"))
@@ -409,9 +412,17 @@ def summarize_dashboard(
         naked_incidents = _int_or_zero(stats.get("naked_incidents"))
         if stats.get("best_edge") is not None:
             best_edge = str(stats.get("best_edge"))
+        if stats.get("max_edge_window") is not None:
+            max_edge_window = str(stats.get("max_edge_window"))
+        maker_quotes = _int_or_zero(stats.get("maker_quotes"))
         hist = stats.get("edge_histogram")
         if isinstance(hist, dict):
             edge_histogram = {str(key): _int_or_zero(value) for key, value in hist.items()}
+        raw_thresholds = stats.get("edge_thresholds")
+        if isinstance(raw_thresholds, dict):
+            edge_thresholds = {
+                str(key): _int_or_zero(value) for key, value in raw_thresholds.items()
+            }
         raw_watch = stats.get("watch")
         if isinstance(raw_watch, list):
             for row in raw_watch:
@@ -508,8 +519,11 @@ def summarize_dashboard(
             "list_hold_s": list_hold_s,
             "list_empty_windows": list_empty_windows,
             "best_edge": best_edge,
+            "max_edge_window": max_edge_window,
+            "maker_quotes": maker_quotes,
             "closest": closest,
             "edge_histogram": edge_histogram,
+            "edge_thresholds": edge_thresholds,
             "watch": watch_rows,
         },
         "closest": closest,
@@ -778,8 +792,11 @@ def render_html(summary: dict[str, Any]) -> str:
     closest = summary.get("closest") or paper.get("closest")
     best_edge = summary.get("best_edge") or paper.get("best_edge")
     histogram = paper.get("edge_histogram") or {}
+    thresholds = paper.get("edge_thresholds") or {}
     watching = paper.get("watching", 0)
     considers = paper.get("nearmiss_considers", 0)
+    maker_quotes = paper.get("maker_quotes", 0)
+    max_edge_window = paper.get("max_edge_window")
     watch_rows = paper.get("watch") or []
     listed_unique = paper.get("listed_unique", 0)
     universe_unique = paper.get("universe_unique", 0)
@@ -806,6 +823,7 @@ def render_html(summary: dict[str, Any]) -> str:
             f'<span>age {_esc(closest.get("book_age_ms"))} ms</span>'
             f'<span>watch {_esc(closest.get("in_watch"))}</span>'
             f'<span>thin {_esc(closest.get("thin"))}</span>'
+            f'<span>window max {_esc(max_edge_window if max_edge_window is not None else "—")}</span>'
             f"</div></div>"
         )
     else:
@@ -1151,6 +1169,7 @@ def render_html(summary: dict[str, Any]) -> str:
       )}
       {_metric("empty windows", list_empty_windows)}
       {_metric("gaps", counts["gaps"])}
+      {_metric("maker quotes", maker_quotes)}
       {_metric("intents", counts["intents"])}
       {_metric("rejects", counts["rejects"])}
       {_metric("fills", counts.get("fills", 0))}
@@ -1183,7 +1202,7 @@ def render_html(summary: dict[str, Any]) -> str:
     </section>
     <section class="panel panel-hist">
       <h2>Edge histogram (walked asks; thin is none)</h2>
-      <p class="empty">considers {_esc(considers)} · hunt stays silent below min_edge 0.01</p>
+      <p class="empty">considers {_esc(considers)} · hunt stays silent below min_edge 0.01 · above -0.005 {_esc((thresholds or {}).get("gt_-0.005", 0))} · above 0 {_esc((thresholds or {}).get("gt_0", 0))} · hunt-ready {_esc((thresholds or {}).get("gte_0.01", 0))}</p>
       {_hist_bars_html(histogram)}
     </section>
     <section class="panel panel-logs">

@@ -6,7 +6,13 @@ from decimal import Decimal
 from pathlib import Path
 
 from arb.adversary import detect_lookahead, detect_mid_fill
-from arb.backtest import BacktestConfig, run_backtest, summarize_tape, walk_bids
+from arb.backtest import (
+    BacktestConfig,
+    analyze_tape_edges,
+    run_backtest,
+    summarize_tape,
+    walk_bids,
+)
 from arb.books import Level
 from arb.fees import pair_taker_fees
 from arb.money import d
@@ -139,6 +145,57 @@ def test_backtest_public_api_has_no_float_literals() -> None:
     for node in ast.walk(tree):
         if isinstance(node, ast.Constant) and type(node.value) is float:
             raise AssertionError("run_backtest must not use float literals")
+
+
+def _complete_ask_events() -> list[dict]:
+    rows: list[dict] = []
+    for ts in (1000, 1400, 1800):
+        for side, token, bid, ask in (
+            ("YES", "yes-flat", "0.49", "0.50"),
+            ("NO", "no-flat", "0.49", "0.50"),
+        ):
+            rows.append(
+                {
+                    "event_type": "book",
+                    "ts_ms": ts,
+                    "timestamp": str(ts),
+                    "condition_id": "syn-flat",
+                    "asset_id": token,
+                    "market_side": side,
+                    "tick_size": "0.01",
+                    "min_order_size": "5",
+                    "bids": [{"price": bid, "size": "20"}],
+                    "asks": [{"price": ask, "size": "50"}],
+                }
+            )
+    return rows
+
+
+def test_analyze_tape_complete_asks_is_maker_completeness() -> None:
+    analysis = analyze_tape_edges(_complete_ask_events())
+    assert analysis["ask_gap_frames"] == 0
+    assert int(analysis["maker_quote_frames"]) >= 1
+    assert Decimal(str(analysis["best_ask_edge"])) == Decimal("0")
+    assert analysis["decision"] == "maker_completeness"
+    assert analysis["edge_thresholds"]["gte_0.01"] == 0
+
+
+def test_maker_complete_tape_fills_at_bid_not_ask() -> None:
+    result = run_backtest(_complete_ask_events(), _honest_cfg())
+    assert result.completed_pairs >= 1
+    assert result.net_pnl > Decimal("0")
+    buys = [fill for fill in result.fills if fill.kind != "hedge"]
+    assert buys
+    for fill in buys:
+        assert fill.fill_source == "bid"
+        assert fill.price in {d("0.49"), d("0.49")}
+
+
+def test_analyze_tape_gap_persist_is_capture() -> None:
+    analysis = analyze_tape_edges(load_jsonl(RECORDED))
+    assert int(analysis["ask_gap_frames"]) >= 1
+    assert analysis["decision"] == "capture"
+    assert analysis["best_ask_edge"] == "0.03"
 
 
 def test_maker_independent_rest_fills_when_touch_holds() -> None:
