@@ -86,12 +86,14 @@ def main(argv: list[str] | None = None) -> int:
     if not path.is_file():
         summary = summarize_tape([])
         print(format_tape_report(summary))
-        return 0
+        return 1
     analysis, summary = replay_tape_path(path)
     print(format_edge_report(analysis))
     print(format_tape_report(summary))
     print(json.dumps({"edges": analysis, "tape": summary}, separators=(",", ":")))
-    return 0
+    if summary["verdict"] == "positive":
+        return 0
+    return 1
 
 
 if __name__ == "__main__":
