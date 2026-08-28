@@ -353,14 +353,14 @@ def summarize_dashboard(
     jsonl_intents = len(intents)
     jsonl_rejects = len(rejects)
     jsonl_fills = len(fills)
+    completed_pairs = sum(1 for row in fills if row.get("completed") is True)
+    naked_incidents = sum(1 for row in fills if row.get("naked") is True)
     reasons = Counter(str(row.get("reason", "unknown")) for row in rejects)
 
     markets_listed = 0
     universe = 0
     bankroll = "500"
     daily_pnl = "0"
-    completed_pairs = 0
-    naked_incidents = 0
     watching = 0
     nearmiss_considers = 0
     watch_rows: list[dict[str, Any]] = []
@@ -399,17 +399,14 @@ def summarize_dashboard(
         jsonl_gaps = max(jsonl_gaps, _int_or_zero(stats.get("gaps")))
         jsonl_intents = max(jsonl_intents, _int_or_zero(stats.get("intents")))
         jsonl_rejects = max(jsonl_rejects, _int_or_zero(stats.get("rejects")))
-        jsonl_fills = max(jsonl_fills, _int_or_zero(stats.get("fills")))
         extra = stats.get("reject_reasons")
         if isinstance(extra, dict) and not reasons:
             for key, value in extra.items():
                 reasons[str(key)] += _int_or_zero(value)
         if stats.get("bankroll") is not None:
             bankroll = str(stats.get("bankroll"))
-        if stats.get("daily_pnl") is not None:
+        if fills and stats.get("daily_pnl") is not None:
             daily_pnl = str(stats.get("daily_pnl"))
-        completed_pairs = _int_or_zero(stats.get("completed_pairs"))
-        naked_incidents = _int_or_zero(stats.get("naked_incidents"))
         if stats.get("best_edge") is not None:
             best_edge = str(stats.get("best_edge"))
         if stats.get("max_edge_window") is not None:
@@ -454,7 +451,7 @@ def summarize_dashboard(
     if stats is None or stats.get("bankroll") is None:
         if sqlite_bankroll is not None:
             bankroll = sqlite_bankroll
-    if stats is None or stats.get("daily_pnl") is None:
+    if fills and (stats is None or stats.get("daily_pnl") is None):
         if sqlite_pnl is not None:
             daily_pnl = sqlite_pnl
 
