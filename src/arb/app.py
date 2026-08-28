@@ -341,6 +341,8 @@ def run_pipeline_traced(
     if gap is None:
         return PipelineTrace(None, None, None, None, None, near, None)
     maker_ev, taker_ev = _estimate_ev(gap, fees)
+    if not fees.rate_known:
+        taker_ev = None
     reason = _approve_reject_reason(gap, portfolio, settings, market_flags)
     if reason is not None:
         return PipelineTrace(gap, None, reason, maker_ev, taker_ev, near, source)
@@ -351,8 +353,11 @@ def run_pipeline_traced(
         approved, fees, settings.min_edge, source=source or "taker"
     )
     if intent is None:
+        fee_reason = (
+            "unknown_fee_rate" if not fees.rate_known else "fee_ev_nonpositive"
+        )
         return PipelineTrace(
-            approved, None, "fee_ev_nonpositive", maker_ev, taker_ev, near, source
+            approved, None, fee_reason, maker_ev, taker_ev, near, source
         )
     return PipelineTrace(approved, intent, None, maker_ev, taker_ev, near, source)
 
@@ -449,7 +454,9 @@ def universe_pair(market: Any) -> UniversePair:
     trading = getattr(market, "trading", None)
     schedule = getattr(trading, "fee_schedule", None)
     rate = getattr(schedule, "rate", None)
-    fee_rate = rate if type(rate) is Decimal else Decimal("0")
+    rate_known = type(rate) is Decimal
+    # Placeholder 0 is not a fee-free hunt; choose_intent refuses unknown rates.
+    fee_rate = rate if rate_known else Decimal("0")
     return UniversePair(
         condition_id=str(getattr(market, "condition_id", "") or ""),
         yes_token_id=yes_id,
@@ -460,7 +467,9 @@ def universe_pair(market: Any) -> UniversePair:
             neg_risk=False,
             binary=True,
         ),
-        fees=MarketFees(yes_rate=fee_rate, no_rate=fee_rate),
+        fees=MarketFees(
+            yes_rate=fee_rate, no_rate=fee_rate, rate_known=rate_known
+        ),
         label=str(
             getattr(market, "question", None)
             or getattr(market, "slug", None)

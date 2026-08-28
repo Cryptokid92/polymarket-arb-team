@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Literal
 
 from arb.books import Book, Level, _reject_float, consume_levels, walk_asks
+from arb.fee_agent import MarketFees, choose_intent
 from arb.fees import pair_taker_fees, taker_fee
 from arb.hunter import hunt
 from arb.maker import maker_complete_quotes
@@ -302,7 +303,19 @@ def run_backtest(
             now_ms=frame.ts_ms,
         )
         quotes = None
-        if gap is None and cfg.maker_complete:
+        if gap is not None:
+            if (
+                choose_intent(
+                    gap,
+                    MarketFees(yes_rate=cfg.fee_rate_yes, no_rate=cfg.fee_rate_no),
+                    cfg.min_edge,
+                    source="taker",
+                )
+                is None
+            ):
+                i += 1
+                continue
+        elif cfg.maker_complete:
             quotes = maker_complete_quotes(
                 yes,
                 no,

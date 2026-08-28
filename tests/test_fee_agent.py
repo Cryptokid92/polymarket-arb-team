@@ -86,6 +86,16 @@ def test_crypto_3c_ask_take_is_none_when_taker_ev_non_positive() -> None:
     assert choose_intent(gap, CRYPTO, MIN_EDGE, source="taker") is None
 
 
+def test_unknown_listing_rate_refuses_taker_even_with_placeholder_zero() -> None:
+    gap = _gap_3c()
+    unknown = MarketFees(yes_rate=d("0"), no_rate=d("0"), rate_known=False)
+    assert choose_intent(gap, unknown, MIN_EDGE, source="taker") is None
+    known_zero = MarketFees(yes_rate=d("0"), no_rate=d("0"), rate_known=True)
+    intent = choose_intent(gap, known_zero, MIN_EDGE, source="taker")
+    assert intent is not None
+    assert intent.path == "taker_fak"
+
+
 def test_fee_free_3c_ask_take_is_taker_fak() -> None:
     gap = _gap_3c()
     intent = choose_intent(gap, FEE_FREE, MIN_EDGE)

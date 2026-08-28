@@ -37,6 +37,7 @@ from arb.app import (
     run_paper,
     sleep_while_listing_paused,
     stream_liveness_probe_due,
+    universe_pair,
     watch_slice,
 )
 from arb.config import Settings
@@ -85,6 +86,7 @@ def _market(
     question: str = "Will X happen?",
     category: str = "Politics",
     closed: bool = False,
+    fee_schedule: object | None = None,
 ) -> SimpleNamespace:
     return SimpleNamespace(
         condition_id=condition_id,
@@ -100,7 +102,7 @@ def _market(
             archived=False,
         ),
         outcomes=SimpleNamespace(yes=_outcome(yes_id, "Yes"), no=_outcome(no_id, "No")),
-        trading=SimpleNamespace(seconds_delay=delay, fee_schedule=None),
+        trading=SimpleNamespace(seconds_delay=delay, fee_schedule=fee_schedule),
     )
 
 
@@ -354,6 +356,18 @@ def _ws_book(token_id: str, bid: str, ask: str, *, min_order_size: str = "") -> 
     )
 
 
+def _fee_schedule(rate: object) -> SimpleNamespace:
+    return SimpleNamespace(rate=rate)
+
+
+def _assert_no_taker_fak(data_dir: Path) -> None:
+    for name in ("fills.jsonl", "intents.jsonl"):
+        path = data_dir / name
+        if not path.is_file():
+            continue
+        assert "taker_fak" not in path.read_text(encoding="utf-8")
+
+
 class _WsNoneMinPublic(_MockPublic):
     """REST books succeed; WS book events omit optional min_order_size."""
 
@@ -398,44 +412,106 @@ async def test_paper_run_writes_gaps_and_intents_from_mock(tmp_path: Path) -> No
             "no-gap-3c": _book("no-gap-3c", "0.41", "0.42"),
         },
     )
+    data_dir = tmp_path / "paper"
     stats = await run_paper(
         client=client,
         settings=_settings(),
         project_root=tmp_path,
-        data_dir=tmp_path / "paper",
+        data_dir=data_dir,
         once=True,
     )
     assert client.list_kwargs["closed"] is False
     assert stats.markets_listed == 1
     assert stats.universe == 1
     assert stats.gaps >= 1
-    assert stats.intents >= 1
-    assert (tmp_path / "paper" / "gaps.jsonl").is_file()
-    assert (tmp_path / "paper" / "intents.jsonl").is_file()
-    stats_path = tmp_path / "paper" / "stats.json"
+    assert (data_dir / "gaps.jsonl").is_file()
+    stats_path = data_dir / "stats.json"
     assert stats_path.is_file()
     snapshot = json.loads(stats_path.read_text(encoding="utf-8"))
     assert snapshot["markets_listed"] == 1
     assert snapshot["universe"] == 1
     assert snapshot["gaps"] >= 1
-    assert snapshot["intents"] >= 1
     assert isinstance(snapshot["heartbeat_ms"], int)
     assert snapshot["heartbeat_ms"] > 0
-    gaps = (tmp_path / "paper" / "gaps.jsonl").read_text(encoding="utf-8").strip()
+    gaps = (data_dir / "gaps.jsonl").read_text(encoding="utf-8").strip()
     assert "raw_edge" in gaps
-    intents = (tmp_path / "paper" / "intents.jsonl").read_text(encoding="utf-8").strip()
+    _assert_no_taker_fak(data_dir)
+    assert Decimal(snapshot["bankroll"]) == Decimal("500")
+    assert Decimal(snapshot["daily_pnl"]) == Decimal("0")
+    restored = StateStore(data_dir / "state.sqlite").restore()
+    assert restored.bankroll == Decimal("500")
+    assert restored.fills == []
+
+
+def test_universe_pair_none_schedule_is_unknown_rate() -> None:
+    pair = universe_pair(_market())
+    assert pair.fees.rate_known is False
+
+
+def test_universe_pair_decimal_zero_is_known_fee_free() -> None:
+    pair = universe_pair(_market(fee_schedule=_fee_schedule(Decimal("0"))))
+    assert pair.fees.rate_known is True
+    assert pair.fees.yes_rate == Decimal("0")
+    assert pair.fees.no_rate == Decimal("0")
+
+
+def test_universe_pair_string_rate_is_unknown_rate() -> None:
+    pair = universe_pair(_market(fee_schedule=_fee_schedule("0.07")))
+    assert pair.fees.rate_known is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "fee_schedule",
+    [None, SimpleNamespace(rate="0.07"), SimpleNamespace(rate=0)],
+)
+async def test_three_cent_without_decimal_rate_writes_no_taker_fak(
+    tmp_path: Path, fee_schedule: object
+) -> None:
+    client = _MockPublic(
+        [_market(fee_schedule=fee_schedule)],
+        {
+            "yes-gap-3c": _book("yes-gap-3c", "0.54", "0.55"),
+            "no-gap-3c": _book("no-gap-3c", "0.41", "0.42"),
+        },
+    )
+    data_dir = tmp_path / "paper"
+    stats = await run_paper(
+        client=client,
+        settings=_settings(),
+        project_root=tmp_path,
+        data_dir=data_dir,
+        once=True,
+    )
+    assert stats.universe == 1
+    assert stats.gaps >= 1
+    _assert_no_taker_fak(data_dir)
+    assert stats.intents == 0
+
+
+@pytest.mark.asyncio
+async def test_decimal_zero_listing_rate_may_still_take(tmp_path: Path) -> None:
+    client = _MockPublic(
+        [_market(fee_schedule=_fee_schedule(Decimal("0")))],
+        {
+            "yes-gap-3c": _book("yes-gap-3c", "0.54", "0.55"),
+            "no-gap-3c": _book("no-gap-3c", "0.41", "0.42"),
+        },
+    )
+    data_dir = tmp_path / "paper"
+    stats = await run_paper(
+        client=client,
+        settings=_settings(),
+        project_root=tmp_path,
+        data_dir=data_dir,
+        once=True,
+        p_miss=d("0"),
+    )
+    assert stats.intents >= 1
+    intents = (data_dir / "intents.jsonl").read_text(encoding="utf-8")
     assert "taker_fak" in intents
-    fills_path = tmp_path / "paper" / "fills.jsonl"
-    assert fills_path.is_file()
-    fill = json.loads(fills_path.read_text(encoding="utf-8").strip().splitlines()[0])
-    assert fill["path"] == "taker_fak"
-    assert Decimal(fill["pnl"]) > Decimal("0")
-    assert Decimal(snapshot["bankroll"]) > Decimal("500")
-    assert Decimal(snapshot["daily_pnl"]) > Decimal("0")
-    restored = StateStore(tmp_path / "paper" / "state.sqlite").restore()
-    assert restored.bankroll is not None
-    assert restored.bankroll > Decimal("500")
-    assert len(restored.fills) == 2
+    fills = (data_dir / "fills.jsonl").read_text(encoding="utf-8")
+    assert "taker_fak" in fills
 
 
 @pytest.mark.asyncio
@@ -1294,7 +1370,7 @@ async def test_paused_control_skips_paper_fills(tmp_path: Path) -> None:
 @pytest.mark.asyncio
 async def test_insufficient_bankroll_rejects_without_negative(tmp_path: Path) -> None:
     client = _MockPublic(
-        [_market()],
+        [_market(fee_schedule=_fee_schedule(Decimal("0")))],
         {
             "yes-gap-3c": _book("yes-gap-3c", "0.54", "0.55"),
             "no-gap-3c": _book("no-gap-3c", "0.41", "0.42"),
@@ -1443,20 +1519,16 @@ async def test_paper_run_writes_nearmiss_alerts_and_books(tmp_path: Path) -> Non
     )
     assert stats.nearmiss_considers >= 1
     assert stats.best_edge == Decimal("0.03")
-    assert stats.alerts >= 1
     assert (data_dir / "nearmiss.jsonl").is_file()
-    assert (data_dir / "alerts.jsonl").is_file()
     assert (data_dir / "books.jsonl").is_file()
     near = json.loads((data_dir / "nearmiss.jsonl").read_text(encoding="utf-8").splitlines()[0])
     assert near["raw_edge"] == "0.03"
     assert near["window_id"] == 1
     assert "book_age_ms" in near
     assert "in_watch" in near
-    alert = json.loads((data_dir / "alerts.jsonl").read_text(encoding="utf-8").splitlines()[0])
-    assert alert["path"] in {"maker_gtc", "taker_fak"}
     snapshot = json.loads((data_dir / "stats.json").read_text(encoding="utf-8"))
     assert snapshot["best_edge"] == "0.03"
-    assert snapshot["alerts"] >= 1
+    _assert_no_taker_fak(data_dir)
 
 
 @pytest.mark.asyncio
@@ -1496,7 +1568,7 @@ async def test_honest_p_miss_one_on_taker_path(tmp_path: Path) -> None:
     that honest=True still completes a maker rest at end-of-run.
     """
     client = _MockPublic(
-        [_market()],
+        [_market(fee_schedule=_fee_schedule(Decimal("0")))],
         {
             "yes-gap-3c": _book("yes-gap-3c", "0.54", "0.55"),
             "no-gap-3c": _book("no-gap-3c", "0.41", "0.42"),
