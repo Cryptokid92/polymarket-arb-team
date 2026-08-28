@@ -134,6 +134,41 @@ Do **not** treat the live `daily_pnl` as a tape verdict. Without the recorded bo
 
 `backtest_tape.py` now streams one `condition_id` at a time (`replay_tape_path`) so the next hour tape does not load 1 GB of JSON into RAM.
 
+## Working-bot backup hour (data/paper, 11:33–12:33 UTC)
+
+Same code as GitHub `main` `582d66a` (PR #30). This VM tree `f143762` diffs empty against that tip. The runner finished the 3600s hour. No `--record-books` (no 1GB tape).
+
+```bash
+ARB_MODE=paper python scripts/paper_run.py --all-markets --seconds 3600 --watch-pairs 100 --watch-rotate-s 1 --list-window-s 60 --data-dir data/paper
+```
+
+`report_paper.py` on that dir:
+
+| Field | Value |
+|---|---|
+| completed pairs | 470 |
+| fills | 470 |
+| intents | 487 |
+| maker quotes | 777 |
+| gaps | 0 |
+| naked incidents | 0 |
+| bankroll | `757.775` |
+| daily_pnl | `257.775` |
+| list_window | 66 |
+| list_wraps | 1 |
+| listed unique | 186_608 |
+| universe unique | 13_776 |
+| walked unique | 13_755 |
+| watching | 100 |
+| best ask edge | `-0.001` |
+| `gt_0` / `gte_0.01` | 0 / 0 |
+| max_open_pairs rejects | 136 |
+| hedge incidents | 0 |
+
+Not halted. Window 1 did not stick. Catalog wrapped once. Hunt stayed silent. Completes were Phase C maker. Paper $500 is not real money.
+
+Gitignored hour files stay out of git (`data/`, sqlite, fills). A copy of that dir plus `stats.json` / `report_paper.txt` / SHA256 is on this agent under `/opt/cursor/artifacts/backups/paper-working-bot-20260828-1133/`. Do **not** treat `daily_pnl` as a tape verdict. There is no `books.jsonl` for this hour. Do not loosen `min_edge`. Do not go live.
+
 ## Go-live (human, later)
 
 Task 12 stays dark. Agents never create `ALLOW_LIVE`. One positive tape replay is not two separate honest paper hours on a live venue. This host is not a live venue. A missing tape is not a pass.
