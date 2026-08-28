@@ -56,8 +56,9 @@ WATCH_PAIRS = 40
 # Pin this many highest-edge pairs inside WATCH_PAIRS. Do not raise the cap.
 PIN_HOT_PAIRS = 8
 # Rotate the watch window so the rest of the universe is visited during
-# a 1-hour run. 90s * 40 pairs ≈ 1600 pair-looks/hour.
-WATCH_ROTATE_S = 10
+# a 1-hour run. 1s * ~32 rotating pairs ≈ one rest-cycle per ~48s on a
+# 1546-pair window. Do not raise WATCH_PAIRS.
+WATCH_ROTATE_S = 1
 _SHORT_WINDOW = re.compile(
     r"(?:^|[^0-9])(?:5|15)(?:\s|-)?(?:m(?:in(?:ute)?s?)?)\b",
     re.IGNORECASE,

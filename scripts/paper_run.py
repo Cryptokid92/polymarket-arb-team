@@ -5,7 +5,7 @@ Usage:
   uv run python scripts/paper_run.py --seconds 3600
   uv run python scripts/paper_run.py --all-markets --seconds 3600
   uv run python scripts/paper_run.py --once --data-dir /tmp/paper
-  uv run python scripts/paper_run.py --all-markets --book-batch-size 50 --watch-pairs 40 --watch-rotate-s 10
+  uv run python scripts/paper_run.py --all-markets --book-batch-size 50 --watch-pairs 40 --watch-rotate-s 1
 """
 
 from __future__ import annotations
