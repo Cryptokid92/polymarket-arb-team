@@ -10,6 +10,8 @@ from http.client import HTTPConnection
 from decimal import Decimal
 from pathlib import Path
 
+import pytest
+
 from arb.app import PaperRunStats, write_paper_stats
 
 FIXTURES = Path(__file__).parent / "fixtures" / "paper_ui"
@@ -338,6 +340,47 @@ def test_source_stays_paper_only() -> None:
     assert "ALLOW_LIVE" not in source
     assert "from polymarket" not in source
     assert "http.server" in source
+
+
+def test_write_paper_stats_retries_winerror_5(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "stats.json"
+    hits = {"n": 0}
+    real = Path.replace
+
+    def flaky(self: Path, target: Path) -> Path:
+        hits["n"] += 1
+        if hits["n"] < 3:
+            err = OSError(5, "Access is denied")
+            err.winerror = 5
+            raise err
+        return real(self, target)
+
+    monkeypatch.setattr(Path, "replace", flaky)
+    monkeypatch.setattr("arb.app.time.sleep", lambda _s: None)
+    write_paper_stats(path, PaperRunStats(), now_ms=1)
+    assert path.is_file()
+    assert hits["n"] == 3
+
+
+def test_write_paper_stats_reraises_after_lock_retries(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    hits = {"n": 0}
+
+    def always(_self: Path, _target: Path) -> Path:
+        hits["n"] += 1
+        err = OSError(5, "Access is denied")
+        err.winerror = 5
+        raise err
+
+    monkeypatch.setattr(Path, "replace", always)
+    monkeypatch.setattr("arb.app.time.sleep", lambda _s: None)
+    with pytest.raises(OSError) as caught:
+        write_paper_stats(tmp_path / "stats.json", PaperRunStats(), now_ms=1)
+    assert getattr(caught.value, "winerror", None) == 5
+    assert hits["n"] == 40
 
 
 def test_write_paper_stats_has_no_account_fields(tmp_path: Path) -> None:
