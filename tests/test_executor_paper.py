@@ -23,6 +23,7 @@ from arb.risk import MarketFlags, Portfolio
 
 FIXTURES = Path(__file__).parent / "fixtures" / "books"
 CRYPTO = MarketFees(yes_rate=d("0.07"), no_rate=d("0.07"))
+FEE_FREE = MarketFees(yes_rate=d("0"), no_rate=d("0"))
 
 
 def _settings() -> Settings:
@@ -77,8 +78,9 @@ def test_paper_modules_never_import_secure_client() -> None:
 @pytest.mark.asyncio
 async def test_paper_broker_writes_one_jsonl_record(tmp_path: Path) -> None:
     yes, no, _ = _load_pair("gap_3c.json")
-    intent = run_pipeline(yes, no, _settings(), _flags(), CRYPTO, _portfolio(), now_ms=1000)
+    intent = run_pipeline(yes, no, _settings(), _flags(), FEE_FREE, _portfolio(), now_ms=1000)
     assert intent is not None
+    assert intent.path == "taker_fak"
     log_path = tmp_path / "intents.jsonl"
     broker = PaperBroker(log_path=log_path)
     yes_order, no_order = await paper_execute(intent, broker)
@@ -120,11 +122,17 @@ async def test_live_broker_post_pair_raises_without_gate(
         await broker.post_pair(intent)
 
 
-def test_pipeline_gap_3c_produces_maker_gtc() -> None:
+def test_pipeline_gap_3c_crypto_is_none() -> None:
     yes, no, _ = _load_pair("gap_3c.json")
     intent = run_pipeline(yes, no, _settings(), _flags(), CRYPTO, _portfolio(), now_ms=1000)
+    assert intent is None
+
+
+def test_pipeline_gap_3c_fee_free_is_taker_fak() -> None:
+    yes, no, _ = _load_pair("gap_3c.json")
+    intent = run_pipeline(yes, no, _settings(), _flags(), FEE_FREE, _portfolio(), now_ms=1000)
     assert intent is not None
-    assert intent.path == "maker_gtc"
+    assert intent.path == "taker_fak"
     assert intent.size > 0
     assert intent.size * (intent.yes_limit + intent.no_limit) <= d("25")
 

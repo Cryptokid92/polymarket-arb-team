@@ -424,11 +424,11 @@ async def test_paper_run_writes_gaps_and_intents_from_mock(tmp_path: Path) -> No
     gaps = (tmp_path / "paper" / "gaps.jsonl").read_text(encoding="utf-8").strip()
     assert "raw_edge" in gaps
     intents = (tmp_path / "paper" / "intents.jsonl").read_text(encoding="utf-8").strip()
-    assert "maker_gtc" in intents
+    assert "taker_fak" in intents
     fills_path = tmp_path / "paper" / "fills.jsonl"
     assert fills_path.is_file()
     fill = json.loads(fills_path.read_text(encoding="utf-8").strip().splitlines()[0])
-    assert fill["path"] == "maker_gtc"
+    assert fill["path"] == "taker_fak"
     assert Decimal(fill["pnl"]) > Decimal("0")
     assert Decimal(snapshot["bankroll"]) > Decimal("500")
     assert Decimal(snapshot["daily_pnl"]) > Decimal("0")
