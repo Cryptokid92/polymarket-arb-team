@@ -107,7 +107,7 @@ It trips on:
 1. **Daily loss.** Realized PnL plus optional unrealized `<= -max_daily_loss`.
 2. **`HALT` file** in the project root.
 3. **WS silence.** Age of last stream/poll *receive* `> ws_stale_ms` (default 3000). This is `StreamHeartbeat` in `app.py`: time of the last REST snapshot or WS/poll delivery. It is **not** CLOB `Book.ts_ms`. Book timestamps are only for hunter/risk `stale_ms`. `consider()` does not pass stream age into `evaluate` (that re-tripped `ws_stale` after human Start while REST still worked). A quiet or closed subscribe iterator REST-probes the current watch first and reconnects if the probe works. Trip only if that probe returns 0. Planned hour end does not persist `ws_stale`. Do not raise `ws_stale_ms`.
-4. **Hedge incidents.** `>= 3` rows in sqlite `hedge_incidents` in the last hour.
+4. **Hedge incidents.** `>= 3` rows in sqlite `hedge_incidents` in the last hour, after the last human Start ack. Start does not auto-fire. Three *new* hedges still kill. Do not raise the 3/hour cap.
 
 Paper halt only sets the flag. Live `cancel_all` is Task 12. Paper Start is the human resume when no `HALT` file is present (`resume_paper_halt`). The runner loop never auto-resumes.
 

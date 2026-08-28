@@ -6,7 +6,7 @@ import uuid
 from dataclasses import dataclass
 from decimal import Decimal
 
-from arb.backtest import _MissRng, _maker_side_fills, walk_bids
+from arb.backtest import _MissRng, _maker_side_fills, _maker_side_taken, walk_bids
 from arb.books import Book, BookStore
 from arb.fee_agent import MarketFees
 from arb.fees import maker_fee, net_edge_maker, net_edge_taker, pair_taker_fees, taker_fee
@@ -395,8 +395,19 @@ class PaperLedger:
             if not timed_out:
                 still.append(rest)
                 continue
-            if yes_ok or no_ok:
-                filled_side = "YES" if yes_ok else "NO"
+            yes_taken = _maker_side_taken(rest.posted_yes, yes, rest.intent.yes_limit)
+            no_taken = _maker_side_taken(rest.posted_no, no, rest.intent.no_limit)
+            if yes_taken and no_taken:
+                results.append(
+                    await self._complete_pair(
+                        rest.intent, rest.fees, now_ms, mode="paper"
+                    )
+                )
+                continue
+            if yes_taken or no_taken:
+                # Only a shown take is a naked. Still-at-bid on one side
+                # while the other moved is a cancel, not a hedge.
+                filled_side = "YES" if yes_taken else "NO"
                 book = yes if filled_side == "YES" else no
                 results.append(
                     self._naked_leg(

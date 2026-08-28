@@ -123,6 +123,23 @@ def test_three_hedge_incidents_per_hour_trip(tmp_path: Path) -> None:
     assert ks.state.restore().halted is True
 
 
+def test_human_resume_does_not_retrip_same_hedge_incidents(tmp_path: Path) -> None:
+    ks = _switch(tmp_path)
+    now = 3_600_000
+    ks.state.record_hedge_incident(now - 1000)
+    ks.state.record_hedge_incident(now - 2000)
+    ks.state.record_hedge_incident(now - 3000)
+    assert ks.evaluate(daily_pnl=d("0"), ws_age_ms=0, now_ms=now) is False
+    assert ks.resume(now_ms=now) is True
+    assert ks.allow_new_intents() is True
+    assert ks.evaluate(daily_pnl=d("0"), ws_age_ms=0, now_ms=now + 10) is True
+    ks.state.record_hedge_incident(now + 20)
+    ks.state.record_hedge_incident(now + 30)
+    ks.state.record_hedge_incident(now + 40)
+    assert ks.evaluate(daily_pnl=d("0"), ws_age_ms=0, now_ms=now + 50) is False
+    assert ks.state.restore().halt_reason == "hedge_incidents"
+
+
 def test_resume_refuses_while_halt_file_present(tmp_path: Path) -> None:
     ks = _switch(tmp_path)
     ks.trip("manual")

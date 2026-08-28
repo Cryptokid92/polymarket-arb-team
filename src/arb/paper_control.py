@@ -10,6 +10,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -155,7 +156,9 @@ def resume_paper_halt(project_root: Path, data_dir: Path) -> bool:
     """Human Start only. Clears sqlite halt when no HALT file is present.
 
     Never called from the runner loop. Daily-loss / hedge stay halted until
-    this human click. A HALT file still blocks resume.
+    this human click. Start acks existing hedge rows so evaluate() does not
+    immediately re-trip the same three. Three new hedges in the next hour
+    still kill. A HALT file still blocks resume.
     """
     root = Path(project_root)
     folder = Path(data_dir)
@@ -168,6 +171,7 @@ def resume_paper_halt(project_root: Path, data_dir: Path) -> bool:
     if not store.restore().halted:
         return True
     store.set_halted(False)
+    store.set_hedge_resume_ms(time.time_ns() // 1_000_000)
     return True
 
 

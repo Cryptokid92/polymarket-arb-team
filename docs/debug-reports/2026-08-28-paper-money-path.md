@@ -72,6 +72,10 @@ Fix: `consider()` and the halted silence tick pass `ws_age_ms=0`. Liveness stays
 
 The recorded hour was not halted. After 70 completed / 1 naked / 74 intents, the next 80+ maker quotes were all `max_open_pairs`. Three honest maker rests were still in memory. `poll_rests` kept them forever when a 5000-window `retain()` dropped their books (`yes is None or no is None: still.append`). `max_open_pairs` 3 is the real cap; it must not stay full of dead rests. Missing-book rests now cancel after `maker_rest_ms`. Window swap force-expires rests before retain. Do not raise `max_open_pairs`.
 
+## Halt `hedge_incidents` (not ws_stale)
+
+The recorded hour halted again with `halt_reason=hedge_incidents`, 3 naked maker rows, fees `0`. Makers pay 0 on the venue; this is not a missing-fee bug. The rest model treated “still at our bid” as a fill. When one book moved and the other stayed, poll_rests marked the quiet side filled and hedged it — a false naked. One-sided still-at-bid now cancels both legs. A shown take (ask through / size down) still hedges. Human Start writes `hedge_resume_ms` so evaluate does not re-trip the same three; 3 new hedges / hour still kill.
+
 ## Go-live (human, later)
 
 Task 12 stays dark. Agents never create `ALLOW_LIVE`. One positive tape replay is not two separate honest paper hours on a live venue. This host is not a live venue.

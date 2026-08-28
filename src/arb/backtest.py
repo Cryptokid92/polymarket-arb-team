@@ -183,6 +183,15 @@ def _buy_fill(
     )
 
 
+def _maker_side_taken(posted: Book, now: Book, limit: Decimal) -> bool:
+    """True when the book shows a take at our limit. Still-at-bid is not a take."""
+    if not now.asks:
+        return False
+    if _ask_size_at(now, limit) < _ask_size_at(posted, limit):
+        return True
+    return now.asks[0].price <= limit
+
+
 def _maker_side_fills(
     posted: Book,
     now: Book,
@@ -195,10 +204,8 @@ def _maker_side_fills(
         return False
     if now.bids and now.bids[0].price >= limit:
         return True
-    if _ask_size_at(now, limit) < _ask_size_at(posted, limit):
-        return True
     # Simple rest model: still at or through our limit after rest → fill.
-    return now.asks[0].price <= limit
+    return _maker_side_taken(posted, now, limit)
 
 
 def _hedge_fill(

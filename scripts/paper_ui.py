@@ -988,7 +988,9 @@ def _why_html(why: dict[str, Any], *, hunt_gaps: int = 0) -> str:
         "<h2>Why this paper PnL</h2>"
         '<p class="why-eq">size × (1 − yes − no) − fees</p>'
         '<p class="empty">Buy YES + NO for ≤ $0.99. Pair redeems $1. '
-        "Makers pay 0. Paper $500 is not real money.</p>"
+        "Makers pay 0 (venue rule, not a hardcoded discount). "
+        "Taker FAK would pay protocol pair fees from the market. "
+        "Paper $500 is not real money.</p>"
         f'<p class="why-id">paid {_esc(_why_qty(why.get("paid")))} → '
         f'redeem {_esc(_why_qty(why.get("redeem"), places="0.01"))} · '
         f'fees {_esc(why.get("fees"))} · '
@@ -1080,6 +1082,12 @@ def render_html(summary: dict[str, Any]) -> str:
         )
     elif halt.get("halted") and halt_reason == "daily_loss":
         halt_hint = "daily_loss is a real kill. Human Start required. Not auto-resumed."
+    elif halt.get("halted") and halt_reason == "hedge_incidents":
+        halt_hint = (
+            "3 paper hedges this hour (one leg filled, the other did not). "
+            "Start (human) acks those rows; 3 new hedges still kill. "
+            "Not auto-resumed."
+        )
     elif halt.get("halted"):
         halt_hint = f"Halt reason {halt_reason}. Not auto-resumed."
     else:
