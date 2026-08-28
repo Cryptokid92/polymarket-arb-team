@@ -9,7 +9,7 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Literal
 
-from arb.books import Book, Level, _reject_float, walk_asks
+from arb.books import Book, Level, _reject_float, consume_levels, walk_asks
 from arb.fees import pair_taker_fees, taker_fee
 from arb.hunter import hunt
 from arb.maker import maker_complete_quotes
@@ -201,12 +201,26 @@ def _maker_side_fills(
 ) -> bool:
     if not rested:
         return False
-    if not now.asks:
-        return False
-    if now.bids and now.bids[0].price >= limit:
-        return True
-    # Simple rest model: still at or through our limit after rest → fill.
     return _maker_side_taken(posted, now, limit)
+
+
+def _book_after_takes(book: Book, *, ask_taken: Decimal, bid_taken: Decimal) -> Book:
+    return book.model_copy(
+        update={
+            "asks": consume_levels(book.asks, ask_taken, asks=True),
+            "bids": consume_levels(book.bids, bid_taken, asks=False),
+        }
+    )
+
+
+def _note_taken(
+    ask_taken: dict[str, Decimal],
+    bid_taken: dict[str, Decimal],
+    token_id: str,
+    fill: FillRecord,
+) -> None:
+    bucket = ask_taken if fill.fill_source == "ask" else bid_taken
+    bucket[token_id] = bucket.get(token_id, _ZERO) + fill.size
 
 
 def _hedge_fill(
@@ -255,8 +269,9 @@ def run_backtest(
     trades = 0
     pnl = _ZERO
     buy_notional = _ZERO
-    kind = cfg.path
 
+    ask_taken: dict[str, Decimal] = {}
+    bid_taken: dict[str, Decimal] = {}
     i = 0
     while i < len(frames):
         frame = frames[i]
@@ -268,9 +283,19 @@ def run_backtest(
                     no_book_ts_ms=frame.no.ts_ms,
                 )
             )
-        gap = hunt(
+        yes = _book_after_takes(
             frame.yes,
+            ask_taken=ask_taken.get(frame.yes.token_id, _ZERO),
+            bid_taken=bid_taken.get(frame.yes.token_id, _ZERO),
+        )
+        no = _book_after_takes(
             frame.no,
+            ask_taken=ask_taken.get(frame.no.token_id, _ZERO),
+            bid_taken=bid_taken.get(frame.no.token_id, _ZERO),
+        )
+        gap = hunt(
+            yes,
+            no,
             cfg.min_edge,
             cfg.min_size,
             cfg.max_shares,
@@ -279,8 +304,8 @@ def run_backtest(
         quotes = None
         if gap is None and cfg.maker_complete:
             quotes = maker_complete_quotes(
-                frame.yes,
-                frame.no,
+                yes,
+                no,
                 min_edge=cfg.min_edge,
                 max_gap=cfg.max_gap,
                 min_size=cfg.min_size,
@@ -292,90 +317,72 @@ def run_backtest(
             i += 1
             continue
 
-        path = "maker_gtc" if quotes is not None else cfg.path
+        path = "maker_gtc" if quotes is not None else "taker_fak"
         yes_limit = quotes.yes_bid if quotes is not None else gap.yes_vwap
         no_limit = quotes.no_bid if quotes is not None else gap.no_vwap
         size = quotes.size if quotes is not None else gap.fillable_shares
         delay = cfg.maker_rest_ms if path == "maker_gtc" else cfg.latency_ms
         exec_ts = frame.ts_ms + delay
-        exec_frame = _frame_at_or_before(frames, exec_ts) or frame
+        raw_exec = _frame_at_or_before(frames, exec_ts) or frame
+        exec_frame_yes = _book_after_takes(
+            raw_exec.yes,
+            ask_taken=ask_taken.get(raw_exec.yes.token_id, _ZERO),
+            bid_taken=bid_taken.get(raw_exec.yes.token_id, _ZERO),
+        )
+        exec_frame_no = _book_after_takes(
+            raw_exec.no,
+            ask_taken=ask_taken.get(raw_exec.no.token_id, _ZERO),
+            bid_taken=bid_taken.get(raw_exec.no.token_id, _ZERO),
+        )
 
         if path == "maker_gtc":
             rested = exec_ts - frame.ts_ms >= cfg.maker_rest_ms
-            yes_ok = _maker_side_fills(
-                frame.yes, exec_frame.yes, yes_limit, rested
+            yes_ok = _maker_side_fills(yes, exec_frame_yes, yes_limit, rested)
+            no_ok = _maker_side_fills(no, exec_frame_no, no_limit, rested)
+            yes_fill = (
+                _limit_buy_fill(
+                    book=exec_frame_yes,
+                    size=size,
+                    price=yes_limit,
+                    ts_ms=exec_ts,
+                    decision_ts_ms=frame.ts_ms,
+                    side="YES",
+                    kind=path,
+                )
+                if yes_ok
+                else None
             )
-            no_ok = _maker_side_fills(frame.no, exec_frame.no, no_limit, rested)
-            if quotes is not None:
-                yes_fill = (
-                    _limit_buy_fill(
-                        book=exec_frame.yes,
-                        size=size,
-                        price=yes_limit,
-                        ts_ms=exec_ts,
-                        decision_ts_ms=frame.ts_ms,
-                        side="YES",
-                        kind=path,
-                    )
-                    if yes_ok
-                    else None
+            no_fill = (
+                _limit_buy_fill(
+                    book=exec_frame_no,
+                    size=size,
+                    price=no_limit,
+                    ts_ms=exec_ts,
+                    decision_ts_ms=frame.ts_ms,
+                    side="NO",
+                    kind=path,
                 )
-                no_fill = (
-                    _limit_buy_fill(
-                        book=exec_frame.no,
-                        size=size,
-                        price=no_limit,
-                        ts_ms=exec_ts,
-                        decision_ts_ms=frame.ts_ms,
-                        side="NO",
-                        kind=path,
-                    )
-                    if no_ok
-                    else None
-                )
-            else:
-                yes_fill = (
-                    _buy_fill(
-                        book=exec_frame.yes,
-                        size=size,
-                        ts_ms=exec_ts,
-                        decision_ts_ms=frame.ts_ms,
-                        side="YES",
-                        kind=kind,
-                    )
-                    if yes_ok
-                    else None
-                )
-                no_fill = (
-                    _buy_fill(
-                        book=exec_frame.no,
-                        size=size,
-                        ts_ms=exec_ts,
-                        decision_ts_ms=frame.ts_ms,
-                        side="NO",
-                        kind=kind,
-                    )
-                    if no_ok
-                    else None
-                )
+                if no_ok
+                else None
+            )
         else:
             yes_fill = _buy_fill(
-                book=exec_frame.yes,
+                book=exec_frame_yes,
                 size=size,
                 ts_ms=exec_ts,
                 decision_ts_ms=frame.ts_ms,
                 side="YES",
-                kind=kind,
+                kind=path,
             )
             no_fill = None
             if yes_fill is not None and not rng.second_fak_misses(cfg.p_miss):
                 no_fill = _buy_fill(
-                    book=exec_frame.no,
+                    book=exec_frame_no,
                     size=size,
                     ts_ms=exec_ts,
                     decision_ts_ms=frame.ts_ms,
                     side="NO",
-                    kind=kind,
+                    kind=path,
                 )
 
         if yes_fill is None and no_fill is None:
@@ -389,13 +396,15 @@ def run_backtest(
             if keep_trace:
                 fills.append(yes_fill)
             buy_notional += yes_fill.price * yes_fill.size
+            _note_taken(ask_taken, bid_taken, yes.token_id, yes_fill)
         if no_fill is not None:
             if keep_trace:
                 fills.append(no_fill)
             buy_notional += no_fill.price * no_fill.size
+            _note_taken(ask_taken, bid_taken, no.token_id, no_fill)
 
         fees = _ZERO
-        if cfg.path == "taker_fak":
+        if path == "taker_fak":
             if yes_fill is not None:
                 fees += taker_fee(yes_fill.size, yes_fill.price, cfg.fee_rate_yes)
             if no_fill is not None:
@@ -412,7 +421,7 @@ def run_backtest(
                     cfg.fee_rate_yes,
                     cfg.fee_rate_no,
                 )
-                if cfg.path == "taker_fak"
+                if path == "taker_fak"
                 else _ZERO
             )
             pnl += merged - (yes_fill.price * merged) - (no_fill.price * merged)
@@ -429,7 +438,7 @@ def run_backtest(
         plan = hedge_plan(leftover_yes, leftover_no)
         if plan is not None:
             naked += 1
-            hedge_book = exec_frame.yes if plan.side == "YES" else exec_frame.no
+            hedge_book = exec_frame_yes if plan.side == "YES" else exec_frame_no
             buy_px = (
                 yes_fill.price
                 if plan.side == "YES" and yes_fill is not None
@@ -447,6 +456,7 @@ def run_backtest(
             )
             if keep_trace:
                 fills.append(hedge)
+            _note_taken(ask_taken, bid_taken, hedge_book.token_id, hedge)
             pnl += proceeds - (buy_px * plan.size)
 
         i += 1

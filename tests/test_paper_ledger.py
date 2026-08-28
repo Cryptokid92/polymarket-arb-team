@@ -220,29 +220,11 @@ async def test_honest_taker_miss_is_naked_hedge(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_honest_maker_rests_then_fills_after_timeout(tmp_path: Path) -> None:
+async def test_honest_maker_rests_then_cancels_when_touch_holds(tmp_path: Path) -> None:
     yes, no, _payload = _load_pair("gap_3c.json")
     books = BookStore()
-    books.apply_snapshot(
-        {
-            "token_id": yes.token_id,
-            "bids": [{"price": str(lvl.price), "size": str(lvl.size)} for lvl in yes.bids],
-            "asks": [{"price": str(lvl.price), "size": str(lvl.size)} for lvl in yes.asks],
-            "tick": str(yes.tick),
-            "min_order_size": str(yes.min_order_size),
-            "ts_ms": yes.ts_ms,
-        }
-    )
-    books.apply_snapshot(
-        {
-            "token_id": no.token_id,
-            "bids": [{"price": str(lvl.price), "size": str(lvl.size)} for lvl in no.bids],
-            "asks": [{"price": str(lvl.price), "size": str(lvl.size)} for lvl in no.asks],
-            "tick": str(no.tick),
-            "min_order_size": str(no.min_order_size),
-            "ts_ms": no.ts_ms,
-        }
-    )
+    _put_book(books, yes.token_id, "0.54", "0.55")
+    _put_book(books, no.token_id, "0.41", "0.42")
     store = StateStore(tmp_path / "state.sqlite")
     ledger = PaperLedger(
         store,
@@ -252,16 +234,43 @@ async def test_honest_maker_rests_then_fills_after_timeout(tmp_path: Path) -> No
         maker_rest_ms=400,
     )
     first = await ledger.try_fill(
-        _maker_intent(d("10")), FEE_FREE, now_ms=1_000, yes=yes, no=no
+        _bid_maker_intent(d("10")), FEE_FREE, now_ms=1_000, yes=yes, no=no
     )
     assert first.outcome == "resting"
     assert first.pnl == Decimal("0")
     assert ledger.bankroll == Decimal("500")
     later = await ledger.poll_rests(books, now_ms=1_400)
     assert len(later) == 1
+    assert later[0].outcome == "canceled"
+    assert later[0].completed is False
+    assert later[0].pnl == Decimal("0")
+
+
+@pytest.mark.asyncio
+async def test_honest_maker_rests_then_fills_on_ask_through(tmp_path: Path) -> None:
+    yes, no, _payload = _load_pair("gap_3c.json")
+    books = BookStore()
+    _put_book(books, yes.token_id, "0.54", "0.55")
+    _put_book(books, no.token_id, "0.41", "0.42")
+    store = StateStore(tmp_path / "state.sqlite")
+    ledger = PaperLedger(
+        store,
+        bankroll=d("500"),
+        daily_pnl=d("0"),
+        honest=True,
+        maker_rest_ms=400,
+    )
+    first = await ledger.try_fill(
+        _bid_maker_intent(d("10")), FEE_FREE, now_ms=1_000, yes=yes, no=no
+    )
+    assert first.outcome == "resting"
+    _put_book(books, yes.token_id, "0.54", "0.54", ts_ms=1_400)
+    _put_book(books, no.token_id, "0.41", "0.41", ts_ms=1_400)
+    later = await ledger.poll_rests(books, now_ms=1_400)
+    assert len(later) == 1
     assert later[0].outcome == "filled"
     assert later[0].completed is True
-    assert later[0].pnl == Decimal("0.30")
+    assert later[0].pnl == Decimal("0.50")
 
 
 @pytest.mark.asyncio

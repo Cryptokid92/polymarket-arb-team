@@ -42,11 +42,11 @@ One Python process. Specialists are functions, not separate services. There is a
 2. **v1 universe filter.** Drop closed/archived, not accepting, neg-risk, delayed (`seconds_delay > 0`), missing YES/NO token ids, and 5/15-minute crypto windows (slug/question/tags matching crypto plus a 5 or 15 minute window).
 3. **Books.** REST snapshot of kept YES/NO token ids in batches (`get_order_books`, default `--book-batch-size 50`, at most 4 in flight). Watch-slice tokens are fetched first. A batch only `consider()`s pairs whose YES+NO books are now present. A failed batch is logged (`book_batch_failed`) and skipped; `PublicApiError` only if every batch fails. Then websocket `subscribe(MarketSpec(token_ids=...))` on a first watch slice only (default `--watch-pairs 100` = 200 tokens). The slice **pins** up to 8 highest walked-edge pairs (`PIN_HOT_PAIRS`) and rotates the rest every `--watch-rotate-s` seconds (default 1). If `subscribe` is missing, poll REST in the same batches. The next 5000-market window is listed with the websocket down, then the runner dwells about 60s (`--list-window-s`) and swaps. If listing eats that dwell, the queued window swaps immediately — subscribe is not opened. Windows where every market is filtered (neg-risk / delay) are skipped immediately; the last tradeable watch slice stays on the board. A quiet or hung subscribe must not block that swap. Empty watch does not trip `ws_stale`. A subscribe error trips `ws_stale` only if the REST book probe also fails. 1s watch-rotate walks remaining pairs over REST and does not tear the websocket down. `ws_stale` still blocks new paper intents. `BookStore.retain` drops tokens that left the window. Do not subscribe all ~1540 pairs at once. Do not raise the listing safety ceiling.
 4. **Near-miss.** Every consider walks ask depth even when hunt is silent. Best walked `raw_edge`, fillable size, book age, and in-watch flag go to `stats.json` / `nearmiss.jsonl`. Thin books do not invent an edge from top-of-book. This is telemetry, not a trade.
-5. **Hunt.** `hunt()` walks both ask books. No gap → nothing else runs. `min_edge` stays `0.01`.
+5. **Hunt.** `hunt()` walks both ask books. Silent hunt then tries maker completeness at the joined best bids. `min_edge` stays `0.01`.
 6. **Risk.** `approve()` may clip size to `max_notional_per_trade` and re-walk both sides. Refusal reasons below.
-7. **Fees / intent.** `choose_intent()` prefers maker GTC. Taker FAK only if EV is still positive after protocol fees plus a `0.005`/share buffer. A chosen intent also writes a local `alerts.jsonl` row (dashboard only; not an order).
+7. **Fees / intent.** `choose_intent(..., source=)` prices the path the pipeline already picked. Hunt is `taker_fak` only when taker EV is positive after protocol fees plus a `0.005`/share buffer. Maker rest is `maker_gtc` when maker EV is positive. A 3c crypto ask take is no intent, not a free GTC. A chosen intent also writes a local `alerts.jsonl` row (dashboard only; not an order).
 8. **Paper executor.** `PaperBroker` writes a YES buy and a NO buy to JSONL with status `paper_posted`. No network. No CLOB order.
-9. **Honest paper fill.** The networked runner does **not** assume both legs fill. Taker FAK may miss the second leg (`p_miss` default 0.3) and flatten leftover with a paper FAK sell (`incident=True`). Maker GTC rests until timeout, then fill, cancel, or hedge. Completeness settlement ($1/share) only when both legs fill. Cost above remaining bankroll is `insufficient_bankroll`. Live merge is Task 12.
+9. **Honest paper fill.** The networked runner does **not** assume both legs fill. Taker FAK may miss the second leg (`p_miss` default 0.3) and flatten leftover with a paper FAK sell (`incident=True`). Maker GTC rests until timeout. A fill needs a shown take (ask through the limit, or size at the limit down). Still-at-bid after timeout is a cancel. Completeness settlement ($1/share) only when both legs fill. Cost above remaining bankroll is `insufficient_bankroll`. Live merge is Task 12.
 
 `scripts/paper_run.py` is that loop. `--place-orders` is rejected. `--paper-bankroll` / `PAPER_BANKROLL` defaults to 500.
 
@@ -66,11 +66,10 @@ Makers pay 0. `maker_fee()` returns 0. Maker rebates are not added to EV.
 
 Paper fee rates come from the listed market's `trading.fee_schedule.rate` when that value is a `Decimal`. Otherwise the mapper uses `0`. Same rate on YES and NO.
 
-Fee agent, in order:
+Fee agent prices the path the pipeline already picked (`source=taker` for hunt, `source=maker` for a bid rest):
 
-- Maker EV = `raw_edge * size`. If that is `> 0`, path is `maker_gtc` (taker fees recorded as 0).
-- Else taker EV = `raw_edge * size - pair_taker_fees - 0.005 * size`. If that is `> 0`, path is `taker_fak`.
-- Else no intent (`fee_ev_nonpositive`).
+- Hunt: taker EV = `raw_edge * size - pair_taker_fees - 0.005 * size`. If that is `> 0`, path is `taker_fak`. Else no intent (`fee_ev_nonpositive`).
+- Maker rest: maker EV = `raw_edge * size`. If that is `> 0`, path is `maker_gtc` (taker fees recorded as 0). Else no intent.
 
 The `0.005`/share buffer is explicit. Do not add other hardcoded bps.
 

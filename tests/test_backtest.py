@@ -180,15 +180,46 @@ def test_analyze_tape_complete_asks_is_maker_completeness() -> None:
     assert analysis["edge_thresholds"]["gte_0.01"] == 0
 
 
-def test_maker_complete_tape_fills_at_bid_not_ask() -> None:
+def test_maker_complete_tape_still_at_bid_does_not_fill() -> None:
     result = run_backtest(_complete_ask_events(), _honest_cfg())
-    assert result.completed_pairs >= 1
-    assert result.net_pnl > Decimal("0")
+    assert result.completed_pairs == 0
     buys = [fill for fill in result.fills if fill.kind != "hedge"]
-    assert buys
+    assert buys == []
+
+
+def _ask_through_events() -> list[dict]:
+    rows: list[dict] = []
+    for ts, ask in ((1000, "0.50"), (1400, "0.49")):
+        for side, token, bid in (
+            ("YES", "yes-flat", "0.49"),
+            ("NO", "no-flat", "0.49"),
+        ):
+            rows.append(
+                {
+                    "event_type": "book",
+                    "ts_ms": ts,
+                    "timestamp": str(ts),
+                    "condition_id": "syn-through",
+                    "asset_id": token,
+                    "market_side": side,
+                    "tick_size": "0.01",
+                    "min_order_size": "5",
+                    "bids": [{"price": bid, "size": "20"}],
+                    "asks": [{"price": ask, "size": "50"}],
+                }
+            )
+    return rows
+
+
+def test_maker_complete_tape_fills_once_on_shown_take() -> None:
+    result = run_backtest(_ask_through_events(), _honest_cfg())
+    assert result.completed_pairs == 1
+    buys = [fill for fill in result.fills if fill.kind != "hedge"]
+    assert len(buys) == 2
     for fill in buys:
         assert fill.fill_source == "bid"
-        assert fill.price in {d("0.49"), d("0.49")}
+        assert fill.price == d("0.49")
+        assert fill.size == d("20")
 
 
 def test_analyze_tape_gap_persist_is_capture() -> None:
@@ -198,7 +229,7 @@ def test_analyze_tape_gap_persist_is_capture() -> None:
     assert analysis["best_ask_edge"] == "0.03"
 
 
-def test_maker_independent_rest_fills_when_touch_holds() -> None:
+def test_hunt_tape_does_not_rest_as_maker_gtc() -> None:
     events = load_jsonl(RECORDED)
     result = run_backtest(
         events,
@@ -206,5 +237,14 @@ def test_maker_independent_rest_fills_when_touch_holds() -> None:
     )
     assert result.completed_pairs >= 1
     for fill in result.fills:
-        if fill.kind == "maker_gtc":
+        if fill.kind != "hedge":
             assert fill.fill_source == "ask"
+            assert fill.kind == "taker_fak"
+
+
+def test_gap_persist_consumes_ask_depth() -> None:
+    result = run_backtest(load_jsonl(RECORDED), _honest_cfg())
+    assert result.completed_pairs == 1
+    buys = [fill for fill in result.fills if fill.kind != "hedge"]
+    assert len(buys) == 2
+    assert {fill.size for fill in buys} == {d("80")}
