@@ -71,19 +71,41 @@ def test_p_miss_one_makes_second_fak_fail_naked() -> None:
 
 
 def test_taker_fees_are_subtracted() -> None:
-    events = load_jsonl(RECORDED)
-    free = run_backtest(events, _honest_cfg())
+    events = _wide_gap_events()
+    free = run_backtest(events, _honest_cfg(latency_ms=0, max_shares=d("80")))
     taxed = run_backtest(
         events,
-        _honest_cfg(fee_rate_yes=d("0.07"), fee_rate_no=d("0.07")),
+        _honest_cfg(
+            latency_ms=0,
+            max_shares=d("80"),
+            fee_rate_yes=d("0.07"),
+            fee_rate_no=d("0.07"),
+        ),
     )
     assert taxed.completed_pairs == free.completed_pairs
     assert taxed.completed_pairs >= 1
     assert taxed.net_pnl < free.net_pnl
+    size = taxed.fills[0].size
     expected_fees = pair_taker_fees(
-        d("80"), d("0.55"), d("80"), d("0.42"), d("0.07"), d("0.07")
+        size, d("0.60"), size, d("0.32"), d("0.07"), d("0.07")
     )
     assert free.net_pnl - taxed.net_pnl == expected_fees * taxed.completed_pairs
+
+
+def test_gap_persist_crypto_fees_do_not_complete_nonpositive_taker_ev() -> None:
+    events = load_jsonl(RECORDED)
+    result = run_backtest(
+        events,
+        _honest_cfg(fee_rate_yes=d("0.07"), fee_rate_no=d("0.07")),
+    )
+    assert result.completed_pairs == 0
+    assert all(fill.kind != "taker_fak" for fill in result.fills)
+
+
+def test_run_backtest_hunt_calls_choose_intent_taker() -> None:
+    source = inspect.getsource(run_backtest)
+    assert "choose_intent" in source
+    assert 'source="taker"' in source or "source='taker'" in source
 
 
 def test_walk_bids_uses_depth_not_mid() -> None:
@@ -145,6 +167,30 @@ def test_backtest_public_api_has_no_float_literals() -> None:
     for node in ast.walk(tree):
         if isinstance(node, ast.Constant) and type(node.value) is float:
             raise AssertionError("run_backtest must not use float literals")
+
+
+def _wide_gap_events() -> list[dict]:
+    rows: list[dict] = []
+    for ts in (1000, 1100, 1200):
+        for side, token, bid, ask in (
+            ("YES", "yes-wide", "0.59", "0.60"),
+            ("NO", "no-wide", "0.31", "0.32"),
+        ):
+            rows.append(
+                {
+                    "event_type": "book",
+                    "ts_ms": ts,
+                    "timestamp": str(ts),
+                    "condition_id": "syn-wide",
+                    "asset_id": token,
+                    "market_side": side,
+                    "tick_size": "0.01",
+                    "min_order_size": "5",
+                    "bids": [{"price": bid, "size": "80"}],
+                    "asks": [{"price": ask, "size": "80"}],
+                }
+            )
+    return rows
 
 
 def _complete_ask_events() -> list[dict]:

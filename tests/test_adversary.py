@@ -92,14 +92,14 @@ def test_crypto_50c_2c_gap_taker_is_not_profitable() -> None:
             min_edge=d("0.01"),
         ),
     )
-    assert result.completed_pairs >= 1
     fees = pair_taker_fees(
         d("100"), d("0.50"), d("100"), d("0.48"), d("0.07"), d("0.07")
     )
     raw = d("0.02") * d("100")
     assert fees > raw
-    assert result.net_pnl <= Decimal("0")
-    assert result.net_pnl == raw - fees
+    assert result.completed_pairs == 0
+    assert result.net_pnl == Decimal("0")
+    assert all(fill.kind != "taker_fak" for fill in result.fills)
 
 
 def test_default_modules_have_no_network_client() -> None:

@@ -20,6 +20,7 @@ class MarketFees(BaseModel):
 
     yes_rate: Decimal
     no_rate: Decimal
+    rate_known: bool = True
 
     @field_validator("yes_rate", "no_rate", mode="before")
     @classmethod
@@ -47,7 +48,7 @@ def choose_intent(
     source: Literal["taker", "maker"] = "taker",
 ) -> Intent | None:
     """Ask-take (hunt) is taker_fak after fees+buffer, else None.
-    Bid-rest (maker completeness) is maker_gtc when maker EV > 0.
+    Unknown listing rate refuses taker. Bid-rest is maker_gtc when maker EV > 0.
     """
     min_edge = _reject_float(min_edge, "min_edge")
     if gap.raw_edge < min_edge:
@@ -68,6 +69,8 @@ def choose_intent(
                 taker_fee_yes=Decimal("0"),
                 taker_fee_no=Decimal("0"),
             )
+        return None
+    if not fees.rate_known:
         return None
     taker_ev = _taker_ev(gap, fees, size)
     if taker_ev > 0:
