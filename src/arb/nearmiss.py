@@ -40,6 +40,7 @@ class NearMiss(BaseModel):
     book_age_ms: int
     in_watch: bool
     thin: bool
+    window_id: int = 1
 
     @field_validator("fillable_shares", mode="before")
     @classmethod
@@ -63,6 +64,7 @@ def measure_pair(
     *,
     condition_id: str,
     in_watch: bool,
+    window_id: int = 1,
 ) -> NearMiss:
     """Walk ask depth. raw_edge is set only when both sides fill min_size."""
     min_size = _reject_float(min_size, "min_size")
@@ -81,6 +83,7 @@ def measure_pair(
             book_age_ms=now_ms - older_ts,
             in_watch=in_watch,
             thin=True,
+            window_id=window_id,
         )
     yes_walk = walk_asks(yes.asks, fillable)
     no_walk = walk_asks(no.asks, fillable)
@@ -96,6 +99,7 @@ def measure_pair(
             book_age_ms=now_ms - older_ts,
             in_watch=in_watch,
             thin=True,
+            window_id=window_id,
         )
     yes_vwap, _yes = yes_walk
     no_vwap, _no = no_walk
@@ -111,6 +115,7 @@ def measure_pair(
         book_age_ms=now_ms - older_ts,
         in_watch=in_watch,
         thin=False,
+        window_id=window_id,
     )
 
 
@@ -135,6 +140,12 @@ def should_log_nearmiss(miss: NearMiss, *, is_new_best: bool) -> bool:
     return miss.raw_edge >= _ZERO
 
 
+_THRESHOLD_GT_NEG_005 = Decimal("-0.005")
+_THRESHOLD_GT_NEG_002 = Decimal("-0.002")
+_THRESHOLD_GT_0 = _ZERO
+_THRESHOLD_GTE_001 = Decimal("0.01")
+
+
 class NearMissTracker:
     """Rolling best + histogram. Does not change hunt/risk caps."""
 
@@ -145,6 +156,19 @@ class NearMissTracker:
         self.histogram: dict[str, int] = {}
         self.considers: int = 0
         self.thin: int = 0
+        self.window_id: int = 1
+        self.max_edge_window: Decimal | None = None
+        self.threshold_counts: dict[str, int] = {
+            "gt_-0.005": 0,
+            "gt_-0.002": 0,
+            "gt_0": 0,
+            "gte_0.01": 0,
+        }
+
+    def set_window(self, window_id: int) -> None:
+        """Reset per-window max. Hunt threshold is unchanged."""
+        self.window_id = int(window_id)
+        self.max_edge_window = None
 
     def observe(self, miss: NearMiss) -> bool:
         self.considers += 1
@@ -154,6 +178,9 @@ class NearMissTracker:
         self.histogram[bucket] = self.histogram.get(bucket, 0) + 1
         is_new_best = False
         if miss.raw_edge is not None:
+            self._note_thresholds(miss.raw_edge)
+            if self.max_edge_window is None or miss.raw_edge > self.max_edge_window:
+                self.max_edge_window = miss.raw_edge
             if self.best is None or self.best.raw_edge is None:
                 self.best = miss
                 is_new_best = True
@@ -162,6 +189,16 @@ class NearMissTracker:
                 is_new_best = True
         self._remember_top(miss)
         return should_log_nearmiss(miss, is_new_best=is_new_best)
+
+    def _note_thresholds(self, raw_edge: Decimal) -> None:
+        if raw_edge > _THRESHOLD_GT_NEG_005:
+            self.threshold_counts["gt_-0.005"] += 1
+        if raw_edge > _THRESHOLD_GT_NEG_002:
+            self.threshold_counts["gt_-0.002"] += 1
+        if raw_edge > _THRESHOLD_GT_0:
+            self.threshold_counts["gt_0"] += 1
+        if raw_edge >= _THRESHOLD_GTE_001:
+            self.threshold_counts["gte_0.01"] += 1
 
     def _remember_top(self, miss: NearMiss) -> None:
         if miss.raw_edge is None:
@@ -185,4 +222,9 @@ class NearMissTracker:
             "closest_thin": best.thin if best is not None else None,
             "nearmiss_considers": self.considers,
             "edge_histogram": dict(self.histogram),
+            "max_edge_window": (
+                str(self.max_edge_window) if self.max_edge_window is not None else None
+            ),
+            "edge_thresholds": dict(self.threshold_counts),
+            "window_id": self.window_id,
         }

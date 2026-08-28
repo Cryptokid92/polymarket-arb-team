@@ -174,6 +174,19 @@ class StateStore:
         ).fetchone()
         return int(row[0]) if row else 0
 
+    def set_hedge_resume_ms(self, now_ms: int) -> None:
+        """Human Start watermark. evaluate() counts hedges after this."""
+        self._set_meta("hedge_resume_ms", str(int(now_ms)))
+
+    def hedge_resume_ms(self) -> int | None:
+        raw = self._get_meta("hedge_resume_ms", "")
+        if not raw:
+            return None
+        try:
+            return int(raw)
+        except ValueError:
+            return None
+
     def restore(self) -> RestoredState:
         open_orders = [
             {

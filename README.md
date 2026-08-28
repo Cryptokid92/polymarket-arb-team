@@ -39,12 +39,13 @@ uv run python scripts/paper_run.py --seconds 3600
 # All open markets (walks list_markets pages; 5000-market windows).
 # Still refuses neg-risk / delay / non-binary / short crypto windows.
 # REST books in batches of 50 token ids (up to 4 in flight).
-# Watches 40 pairs (80 tokens); remaining window pairs rotate every 1s.
+# Watches 100 pairs (200 tokens); remaining window pairs rotate every 1s.
 # Next 5000 is listed, then the window swaps about every 60s.
+# When the catalog cursor is exhausted, the next list is page 1 again.
 # Do not subscribe all 1540. Do not raise 5000.
 uv run python scripts/paper_run.py --all-markets --seconds 3600
 # equivalent: --max-markets 0
-# optional: --book-batch-size 50 --watch-pairs 40 --watch-rotate-s 1
+# optional: --book-batch-size 50 --watch-pairs 100 --watch-rotate-s 1
 ```
 
 In another terminal, watch the gitignored logs (read-only local UI, binds `127.0.0.1:8765`):
@@ -70,7 +71,7 @@ uv run python scripts/record_books.py --all-markets --once --out data/paper/book
 uv run python scripts/backtest_tape.py --tape data/paper/books.jsonl
 ```
 
-If the tape backtest verdict is `non_positive`, stop. Do not loosen risk. Do not go live.
+`backtest_tape.py` streams one market at a time so a 1GB hour tape does not have to sit in RAM. If the tape backtest verdict is `non_positive`, stop. Do not loosen risk. Do not go live.
 
 Writes gitignored JSONL (covered by `data/`):
 
@@ -80,7 +81,7 @@ Writes gitignored JSONL (covered by `data/`):
 - `data/paper/stats.json` — markets listed / universe / unique listed / unique walked plus `bankroll`, `daily_pnl`, `fills`, and `heartbeat_ms` for the dashboard
 - `data/paper/fills.jsonl` — paper fills and completeness PnL (not real money)
 
-`paper_ui.py` shows paper bankroll, realized PnL (earned/lost), intents, fills, unique markets listed/walked across windows, the current list window, and the watch slice. If the JSONL files are missing it shows zeros and does not invent trades. Local Start/Stop pauses or launches `paper_run` (`ARB_MODE=paper`); Start is the human resume for a prior `ws_stale` when no `HALT` file is present. The watch-rotate slider (1–120s) writes `control.json` and does not change risk caps. Data is GET; control POSTs are 127.0.0.1 only. Run status follows the newest JSONL timestamp, `stats.json` mtime, or `heartbeat_ms` — a live runner rewriting stats is **running**, not stale. Halt still comes only from `HALT` / sqlite. `ws_stale` means the stream or REST probe failed, not daily loss. Banner: **PAPER MODE. Not live. Not financial advice.** Auto-refreshes every 2s. Paper $500 is not real money.
+`paper_ui.py` shows paper bankroll, realized PnL (earned/lost), intents, fills, unique markets listed/walked across windows, the current list window, catalog wraps, and the watch slice. List window increments when the next 5000 is ready; if listing ate the 60s dwell it swaps without opening subscribe. If the JSONL files are missing it shows zeros and does not invent trades. Local Start/Stop pauses or launches `paper_run` (`ARB_MODE=paper`); Start is the human resume for a prior `ws_stale` when no `HALT` file is present. Start does not re-trip on stream age; a failed REST liveness probe still halts. The watch-rotate slider (1–120s) writes `control.json` and does not change risk caps. Data is GET; control POSTs are 127.0.0.1 only. Run status follows the newest JSONL timestamp, `stats.json` mtime, or `heartbeat_ms` — a live runner rewriting stats is **running**, not stale. Halt still comes only from `HALT` / sqlite. `ws_stale` means the stream or REST probe failed, not daily loss. Banner: **PAPER MODE. Not live. Not financial advice.** Auto-refreshes every 2s. Paper $500 is not real money.
 
 `report_paper.py` prints: gaps seen, intents approved, estimated maker EV, estimated taker EV, reject reasons.
 
@@ -90,7 +91,7 @@ These match the installed client in this repo. If they drift, follow the install
 
 - `AsyncPublicClient.list_markets(closed=False, page_size=100)` — paginator; the runner walks pages (`async for page in pages`) for one 5000-market window. Resume later windows with official `page.next_cursor` / `from_cursor`. `--all-markets` / `--max-markets 0` means no user cap; the 5000 ceiling is the window size, not the whole catalog.
 - `get_order_books(token_ids=...)` — snapshot asks+bids+depth, **batched** (default `--book-batch-size 50`). A failed batch is logged; other batches continue. One fat payload must not kill the run.
-- `subscribe(MarketSpec(token_ids=...))` **is** present. The runner watches a first slice only (default `--watch-pairs 40` = 80 tokens) and rotates remaining universe pairs (`--watch-rotate-s 1`). If `subscribe` is missing on a future client, it polls `get_order_books` in the same batches.
+- `subscribe(MarketSpec(token_ids=...))` **is** present. The runner watches a first slice only (default `--watch-pairs 100` = 200 tokens) and rotates remaining universe pairs (`--watch-rotate-s 1`). If `subscribe` is missing on a future client, it polls `get_order_books` in the same batches.
 
 ## Layout
 

@@ -67,9 +67,18 @@ Paper $500 bankroll + dashboard controls (not Task 12): paper-fill both legs at 
 - `uv run pytest -q` — 185 passed
 - Plan: `docs/plans/cursor-paper-bankroll-pnl.md`
 
-Paper trading helper (not Task 12): closest-book / near-miss JSONL + stats, `record_books.py` streams official public books, honest paper fills (FAK miss / maker rest / naked hedge), pin 8 hot pairs inside `WATCH_PAIRS=40`, local `alerts.jsonl`, `scripts/backtest_tape.py`. Caps unchanged (`min_edge` 0.01, `stale_ms` 400, `LIST_SAFETY_CAP` 5000). Task 12 stays dark.
+Paper trading helper (not Task 12): closest-book / near-miss JSONL + stats, `record_books.py` streams official public books, honest paper fills (FAK miss / maker rest / naked hedge), pin 8 hot pairs inside `WATCH_PAIRS=100`, local `alerts.jsonl`, `scripts/backtest_tape.py`. Caps unchanged (`min_edge` 0.01, `stale_ms` 400, `LIST_SAFETY_CAP` 5000). Task 12 stays dark.
 
 - `uv run pytest -q` — 216 passed
 - Plan: `docs/plans/cursor-paper-trading-helper.md`
 - Evidence: `docs/debug-reports/2026-08-27-paper-evidence.md` — 1-hour `--all-markets` finished (`listed=5000` / `universe=1546` / `gaps=0` / best walked edge `-0.001`). Same-market tape: 0 trades, verdict `non_positive`. Stop. Do not loosen `min_edge`. Task 12 stays dark.
+- `ALLOW_LIVE` was not created. Live trading is not enabled. No secrets committed.
+
+Paper money path (Milestone 13, not Task 12): Phase A telemetry + watch-while-list. 27 Aug tape has `ask_gap_frames=0` / best ask edge `-0.001` → Phase C maker completeness (bid both sides at `min_edge` 0.01). Same tape replay: `completed_pairs=154`, `naked_incidents=0`, `net_pnl=32.215`, verdict `positive`. Caps unchanged. Task 12 stays dark.
+
+- Plan: `docs/plans/cursor-paper-money-path.md`
+- Evidence: `docs/debug-reports/2026-08-28-paper-money-path.md`
+- `uv run pytest -q` — 279 passed
+- List-window stall: if listing the next 5000 eats the 60s dwell, swap immediately (do not open subscribe). Window 1 must not stick after the next page is already listed.
+- Clean hour exited: `list_window=69`, `completed_pairs=520`, `naked_incidents=0`, paper `daily_pnl=235.690`. Tape replay OOM'd on the 1.1GB `books.jsonl` and the gitignored dir was lost. `backtest_tape.py` now streams per market. No tape verdict. Do not go live.
 - `ALLOW_LIVE` was not created. Live trading is not enabled. No secrets committed.

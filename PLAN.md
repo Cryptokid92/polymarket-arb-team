@@ -68,6 +68,10 @@ Paper $500 bankroll (not real money). Successful intents paper-fill both legs at
 
 Near-miss telemetry, public book recorder, honest paper fills (one-leg miss / maker rest / naked hedge), hot watch pin inside the 40-pair cap, local alerts, tape backtest. Caps unchanged. See `docs/plans/cursor-paper-trading-helper.md`.
 
+## Paper money path (Milestone 13, not Task 12)
+
+Phase A telemetry (edge thresholds, max edge per window, watch-while-list). Tape gate: asks stay complete (`best_edge=-0.001`, no ask-gap frames) → Phase C maker completeness at `min_edge` 0.01. Honest tape on the 27 Aug hour: `completed_pairs=154`, `naked_incidents=0`, `net_pnl=32.215`, verdict `positive`. Caps unchanged. See `docs/plans/cursor-paper-money-path.md`.
+
 ## Remaining
 
-12. Live path (build dark, do not run) — not now. Agents never create `ALLOW_LIVE`. This host is not a live venue.
+12. Live path (build dark, do not run) — not now. Agents never create `ALLOW_LIVE`. This host is not a live venue. One positive paper tape is not a live go.

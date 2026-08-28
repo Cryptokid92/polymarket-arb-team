@@ -7,8 +7,9 @@ import contextlib
 import inspect
 import json
 import re
+import threading
 import time
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator, Callable, Sequence
 from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
@@ -22,6 +23,7 @@ from arb.fee_agent import MarketFees, choose_intent
 from arb.fees import net_edge_maker, net_edge_taker, pair_taker_fees
 from arb.hunter import hunt
 from arb.killswitch import KillSwitch
+from arb.maker import gap_from_maker_quotes, maker_complete_quotes
 from arb.messages import GapFound, Intent
 from arb.nearmiss import NearMiss, NearMissTracker, measure_pair
 from arb.paper_control import (
@@ -51,14 +53,14 @@ BOOK_BATCH_SIZE = 50
 # In-flight get_order_books calls. Do not raise BOOK_BATCH_SIZE.
 BOOK_FETCH_CONCURRENCY = 4
 LIST_CURSOR_FILENAME = "list_cursor.json"
-# Live subscribe/poll window. 40 pairs = 80 token ids. Do not subscribe
+# Live subscribe/poll window. 100 pairs = 200 token ids. Do not subscribe
 # all ~1540 universe pairs at once.
-WATCH_PAIRS = 40
-# Pin this many highest-edge pairs inside WATCH_PAIRS. Do not raise the cap.
+WATCH_PAIRS = 100
+# Pin this many highest-edge pairs inside WATCH_PAIRS. Do not raise the pin.
 PIN_HOT_PAIRS = 8
 # Rotate the watch window so the rest of the universe is visited during
-# a 1-hour run. 1s * ~32 rotating pairs ≈ one rest-cycle per ~48s on a
-# 1546-pair window. Do not raise WATCH_PAIRS.
+# a 1-hour run. 1s * ~92 rotating pairs ≈ one rest-cycle per ~17s on a
+# 1546-pair window.
 WATCH_ROTATE_S = 1
 # Dwell on one 5000-market window this long, then swap if the next
 # window is listed. Listing runs first (no websocket) so 50 official
@@ -82,6 +84,7 @@ class PipelineTrace:
     maker_ev: Decimal | None
     taker_ev: Decimal | None
     near_miss: NearMiss | None = None
+    source: str | None = None
 
 
 @dataclass
@@ -122,6 +125,9 @@ class PaperRunStats:
     closest_thin: bool | None = None
     nearmiss_considers: int = 0
     edge_histogram: dict[str, int] = field(default_factory=dict)
+    max_edge_window: Decimal | None = None
+    edge_thresholds: dict[str, int] = field(default_factory=dict)
+    maker_quotes: int = 0
     watch: list[dict[str, Any]] = field(default_factory=list)
     list_window: int = 1
     list_cursor: str | None = None
@@ -154,6 +160,24 @@ class StreamHeartbeat:
         if self.last_receive_ms is None:
             return self._NEVER_RECEIVED_AGE_MS
         return max(0, now_ms - self.last_receive_ms)
+
+
+def list_hold_remaining_s(
+    *,
+    now: float,
+    window_until: float,
+    hold_s: float,
+    pair_count: int,
+) -> float:
+    """Seconds left on this 5000-window dwell. 0 means swap now.
+
+    Listing the next page can eat the 60s hold. Do not open subscribe
+    when this is already 0 — official aclose / wait_for can sit on
+    window 1 while the next 5000 is already listed.
+    """
+    if hold_s <= 0 or pair_count <= 0:
+        return 0.0
+    return max(0.0, float(window_until) - float(now))
 
 
 def list_cycle_may_continue(
@@ -196,6 +220,63 @@ def stream_liveness_probe_due(*, age_ms: int, ws_stale_ms: int) -> bool:
     return age_ms >= max(1, (ws_stale_ms * 2) // 3)
 
 
+_PROGRESS_INT_FIELDS = (
+    "completed_pairs",
+    "naked_incidents",
+    "maker_quotes",
+    "intents",
+    "alerts",
+    "gaps",
+)
+
+
+def restore_progress_from_stats(path: Path, stats: PaperRunStats) -> None:
+    """Keep hour counters across a same-dir restart. Uniques stay in seen_markets."""
+    if not path.is_file():
+        return
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return
+    if not isinstance(payload, dict):
+        return
+    for field in _PROGRESS_INT_FIELDS:
+        raw = payload.get(field)
+        if raw is None:
+            continue
+        try:
+            value = int(raw)
+        except (TypeError, ValueError):
+            continue
+        if value < 0:
+            continue
+        setattr(stats, field, value)
+
+
+async def sleep_while_listing_paused(
+    leftover_s: float,
+    *,
+    should_resume: Callable[[], bool],
+    poll_s: float = 0.25,
+) -> bool:
+    """Wait leftover after ws_stale. True if human Start cleared the halt.
+
+    Listing may continue while intents are paused. A Start click must not
+    wait out the rest of the 60s window before considering again.
+    """
+    deadline = time.monotonic() + max(0.0, leftover_s)
+    if should_resume():
+        return True
+    while time.monotonic() < deadline:
+        if should_resume():
+            return True
+        step = min(poll_s, deadline - time.monotonic())
+        if step <= 0:
+            break
+        await asyncio.sleep(step)
+    return bool(should_resume())
+
+
 def run_pipeline(
     yes: Book,
     no: Book,
@@ -221,6 +302,7 @@ def run_pipeline_traced(
     *,
     in_watch: bool = False,
     condition_id: str | None = None,
+    window_id: int = 1,
 ) -> PipelineTrace:
     min_size = (
         yes.min_order_size
@@ -236,21 +318,41 @@ def run_pipeline_traced(
         now_ms,
         condition_id=cid,
         in_watch=in_watch,
+        window_id=window_id,
     )
     gap = hunt(yes, no, settings.min_edge, min_size, _MAX_SHARES, now_ms)
+    source: str | None = None
+    if gap is not None:
+        source = "taker"
+    else:
+        quotes = maker_complete_quotes(
+            yes,
+            no,
+            min_edge=settings.min_edge,
+            max_gap=settings.max_gap,
+            min_size=min_size,
+            max_notional=settings.max_notional_per_trade,
+            stale_ms=settings.stale_ms,
+            now_ms=now_ms,
+        )
+        if quotes is not None:
+            gap = gap_from_maker_quotes(yes, no, quotes, now_ms, cid)
+            source = "maker"
     if gap is None:
-        return PipelineTrace(None, None, None, None, None, near)
+        return PipelineTrace(None, None, None, None, None, near, None)
     maker_ev, taker_ev = _estimate_ev(gap, fees)
     reason = _approve_reject_reason(gap, portfolio, settings, market_flags)
     if reason is not None:
-        return PipelineTrace(gap, None, reason, maker_ev, taker_ev, near)
+        return PipelineTrace(gap, None, reason, maker_ev, taker_ev, near, source)
     approved = approve(gap, portfolio, settings, market_flags)
     if approved is None:
-        return PipelineTrace(gap, None, "risk_rejected", maker_ev, taker_ev, near)
+        return PipelineTrace(gap, None, "risk_rejected", maker_ev, taker_ev, near, source)
     intent = choose_intent(approved, fees, settings.min_edge)
     if intent is None:
-        return PipelineTrace(approved, None, "fee_ev_nonpositive", maker_ev, taker_ev, near)
-    return PipelineTrace(approved, intent, None, maker_ev, taker_ev, near)
+        return PipelineTrace(
+            approved, None, "fee_ev_nonpositive", maker_ev, taker_ev, near, source
+        )
+    return PipelineTrace(approved, intent, None, maker_ev, taker_ev, near, source)
 
 
 async def paper_execute(
@@ -441,6 +543,11 @@ def write_paper_stats(
         "closest_thin": stats.closest_thin,
         "nearmiss_considers": stats.nearmiss_considers,
         "edge_histogram": dict(stats.edge_histogram),
+        "max_edge_window": (
+            str(stats.max_edge_window) if stats.max_edge_window is not None else None
+        ),
+        "edge_thresholds": dict(stats.edge_thresholds),
+        "maker_quotes": stats.maker_quotes,
         "watch": list(stats.watch),
         "list_window": stats.list_window,
         "list_cursor": stats.list_cursor,
@@ -797,6 +904,10 @@ def _sync_tracker_stats(stats: PaperRunStats, tracker: NearMissTracker) -> None:
     stats.nearmiss_considers = int(snap["nearmiss_considers"])
     hist = snap["edge_histogram"]
     stats.edge_histogram = dict(hist) if isinstance(hist, dict) else {}
+    raw_window = snap.get("max_edge_window")
+    stats.max_edge_window = Decimal(str(raw_window)) if raw_window is not None else None
+    thresholds = snap.get("edge_thresholds")
+    stats.edge_thresholds = dict(thresholds) if isinstance(thresholds, dict) else {}
 
 
 def _nearmiss_row(miss: NearMiss, now_ms: int) -> dict[str, Any]:
@@ -810,6 +921,7 @@ def _nearmiss_row(miss: NearMiss, now_ms: int) -> dict[str, Any]:
         "book_age_ms": miss.book_age_ms,
         "in_watch": miss.in_watch,
         "thin": miss.thin,
+        "window_id": miss.window_id,
     }
 
 
@@ -861,9 +973,17 @@ async def run_paper(
     rejects_path = data_dir / "rejects.jsonl"
     fills_path = data_dir / "fills.jsonl"
     nearmiss_path = data_dir / "nearmiss.jsonl"
+    maker_quotes_path = data_dir / "maker_quotes.jsonl"
     alerts_path = data_dir / "alerts.jsonl"
     stats_path = data_dir / "stats.json"
     stats = PaperRunStats()
+    restore_progress_from_stats(data_dir / "stats.json", stats)
+    stats_io = threading.Lock()
+
+    def persist_stats() -> None:
+        with stats_io:
+            write_paper_stats(stats_path, stats)
+
     stats.list_window_s = max(0, int(list_window_s))
     store = BookStore()
     heartbeat = StreamHeartbeat()
@@ -914,6 +1034,7 @@ async def run_paper(
     saved_cursor, saved_window, saved_wraps = read_list_cursor_state(data_dir)
     stats.list_window = saved_window
     stats.list_wraps = saved_wraps
+    tracker.set_window(stats.list_window)
     seen = load_seen_markets(data_dir)
     seen.apply_to(stats)
     last_saved_walked = seen.walked_unique
@@ -1030,7 +1151,7 @@ async def run_paper(
         )
 
     refresh_watch_board()
-    write_paper_stats(stats_path, stats)
+    persist_stats()
 
     def current_watch_tokens() -> list[str]:
         return pair_token_ids(current_watch_pairs())
@@ -1076,11 +1197,11 @@ async def run_paper(
             apply_settled_fill(fill, _now_ms())
         stats.bankroll = ledger.bankroll
         stats.daily_pnl = ledger.daily_pnl
-        write_paper_stats(stats_path, stats)
+        persist_stats()
 
     async def consider(pair: UniversePair) -> None:
         if read_control(data_dir).paused:
-            write_paper_stats(stats_path, stats)
+            persist_stats()
             return
         yes = store.get(pair.yes_token_id)
         no = store.get(pair.no_token_id)
@@ -1092,12 +1213,16 @@ async def run_paper(
         now_ms = _now_ms()
         in_watch = pair.condition_id in watch_ids()
         portfolio.halted = not kill.allow_new_intents()
+        # Stream liveness is watch_silence + REST probe, not consider().
+        # Passing the stream-receive age here re-trips ws_stale after human
+        # Start (dead subscribe, REST still fine, age often > ws_stale_ms).
         kill.evaluate(
             daily_pnl=portfolio.daily_pnl,
-            ws_age_ms=heartbeat.age_ms(now_ms),
+            ws_age_ms=0,
             now_ms=now_ms,
         )
         portfolio.halted = not kill.allow_new_intents()
+        portfolio.open_pairs = ledger.resting_pairs
         trace = run_pipeline_traced(
             yes,
             no,
@@ -1108,6 +1233,7 @@ async def run_paper(
             now_ms,
             in_watch=in_watch,
             condition_id=pair.condition_id,
+            window_id=stats.list_window,
         )
         if trace.near_miss is not None:
             miss = trace.near_miss
@@ -1115,7 +1241,7 @@ async def run_paper(
             if tracker.observe(miss):
                 _append_jsonl(nearmiss_path, _nearmiss_row(miss, now_ms))
             _sync_tracker_stats(stats, tracker)
-        if trace.gap is not None:
+        if trace.gap is not None and trace.source == "taker":
             stats.gaps += 1
             _append_jsonl(
                 gaps_path,
@@ -1130,6 +1256,26 @@ async def run_paper(
                     "maker_ev": str(trace.maker_ev) if trace.maker_ev is not None else None,
                     "taker_ev": str(trace.taker_ev) if trace.taker_ev is not None else None,
                     "reject_reason": trace.reject_reason,
+                    "source": "taker",
+                },
+            )
+        if trace.gap is not None and trace.source == "maker":
+            stats.maker_quotes += 1
+            _append_jsonl(
+                maker_quotes_path,
+                {
+                    "ts_ms": now_ms,
+                    "condition_id": pair.condition_id,
+                    "raw_edge": str(trace.gap.raw_edge),
+                    "yes_vwap": str(trace.gap.yes_vwap),
+                    "no_vwap": str(trace.gap.no_vwap),
+                    "fillable_shares": str(trace.gap.fillable_shares),
+                    "book_age_ms": trace.gap.book_age_ms,
+                    "maker_ev": str(trace.maker_ev) if trace.maker_ev is not None else None,
+                    "window_id": stats.list_window,
+                    "in_watch": in_watch,
+                    "reject_reason": trace.reject_reason,
+                    "source": "maker",
                 },
             )
         if trace.reject_reason:
@@ -1142,7 +1288,7 @@ async def run_paper(
                 },
             )
             _bump(stats, trace.reject_reason)
-        if trace.intent is not None:
+        if trace.intent is not None and not ledger.has_rest(pair.condition_id):
             fill = await ledger.try_fill(
                 trace.intent, pair.fees, now_ms, mode="paper", yes=yes, no=no
             )
@@ -1167,11 +1313,12 @@ async def run_paper(
                 apply_settled_fill(fill, now_ms)
         for settled in await ledger.poll_rests(store, now_ms):
             apply_settled_fill(settled, now_ms)
+        portfolio.open_pairs = ledger.resting_pairs
         stats.bankroll = ledger.bankroll
         stats.daily_pnl = ledger.daily_pnl
         _sync_tracker_stats(stats, tracker)
         refresh_watch_board()
-        write_paper_stats(stats_path, stats)
+        persist_stats()
 
     all_token_ids = pair_token_ids(pairs)
 
@@ -1187,7 +1334,7 @@ async def run_paper(
             },
         )
         _bump(stats, "book_batch_failed")
-        write_paper_stats(stats_path, stats)
+        persist_stats()
 
     def make_apply(consider_pairs: list[UniversePair] | None = None) -> Any:
         async def apply_book_batch(books: Any, batch: list[str]) -> None:
@@ -1208,7 +1355,7 @@ async def run_paper(
                     },
                 )
                 _bump(stats, "invalid_book_update")
-                write_paper_stats(stats_path, stats)
+                persist_stats()
                 return
             targets = consider_pairs if consider_pairs is not None else pairs
             for pair in pairs_ready_from_batch(targets, batch, store):
@@ -1216,7 +1363,7 @@ async def run_paper(
                     record_pair_books(pair)
                 await consider(pair)
             refresh_watch_board()
-            write_paper_stats(stats_path, stats)
+            persist_stats()
 
         return apply_book_batch
 
@@ -1256,7 +1403,7 @@ async def run_paper(
         _sync_tracker_stats(stats, tracker)
         refresh_watch_board()
         persist_seen(force=True)
-        write_paper_stats(stats_path, stats)
+        persist_stats()
         if recorder is not None:
             recorder.close()
         clear_pid(data_dir)
@@ -1266,7 +1413,7 @@ async def run_paper(
     rotated = asyncio.Event()
 
     refresh_watch_board()
-    write_paper_stats(stats_path, stats)
+    persist_stats()
 
     def trip_dead_stream() -> None:
         """Persist ws_stale. Never auto-resumes."""
@@ -1305,7 +1452,7 @@ async def run_paper(
                 },
             )
             _bump(stats, "invalid_book_update")
-            write_paper_stats(stats_path, stats)
+            persist_stats()
             return
         seen: set[str] = set()
         if isinstance(update, (list, tuple)):
@@ -1329,7 +1476,6 @@ async def run_paper(
         if not current_watch_tokens():
             return 1
         probe_ok = 0
-        probe_timeout_s = max(0.05, settings.ws_stale_ms / 1000)
 
         async def probe_ok_batch(books: Any, _batch: list[str]) -> None:
             nonlocal probe_ok
@@ -1338,10 +1484,9 @@ async def run_paper(
 
         async def probe_one(batch: list[str]) -> None:
             try:
-                books = await asyncio.wait_for(
-                    _fetch_books(client, batch),
-                    timeout=probe_timeout_s,
-                )
+                # Do not add a short client-side deadline. A slow
+                # get_order_books is not a dead venue.
+                books = await _fetch_books(client, batch)
             except (PublicApiError, TimeoutError, asyncio.TimeoutError) as exc:
                 await log_batch_fail(batch, exc)
                 return
@@ -1349,10 +1494,10 @@ async def run_paper(
 
         for batch in chunk_ids(current_watch_tokens(), batch_size):
             await probe_one(batch)
-            write_paper_stats(stats_path, stats)
+            persist_stats()
         return probe_ok
 
-    async def consume_slice() -> None:
+    async def consume_slice(*, stop_at: float) -> None:
         tokens = current_watch_tokens()
         if not tokens:
             return
@@ -1365,7 +1510,11 @@ async def run_paper(
                 on_batch_fail=log_batch_fail,
             ):
                 await handle_update(update)
-                if time.monotonic() >= deadline:
+                now = time.monotonic()
+                # Stop this slice when the 60s list dwell ends. Do not wait
+                # for --seconds. A live subscribe flood used to sit on
+                # window 1 after the next 5000 was already listed.
+                if now >= deadline or now >= stop_at:
                     return
         except asyncio.CancelledError:
             raise
@@ -1375,7 +1524,7 @@ async def run_paper(
             if await rest_probe_watch() == 0:
                 trip_dead_stream()
             return
-        if time.monotonic() >= deadline:
+        if time.monotonic() >= deadline or time.monotonic() >= stop_at:
             return
         if await rest_probe_watch() == 0:
             trip_dead_stream()
@@ -1388,21 +1537,37 @@ async def run_paper(
             # Do not cancel subscribe on every 1s rotate. Official aclose
             # prints heartbeat-stale and trips ws_stale while REST is fine.
             # REST rotate_watch walks the rotating slice.
-            remaining = min(deadline, stop_at) - now
-            slice_task = asyncio.create_task(consume_slice())
-            try:
-                await asyncio.wait_for(slice_task, timeout=max(0.01, remaining))
-            except asyncio.TimeoutError:
-                await _abandon_task(slice_task)
+            leftover = min(deadline, stop_at) - now
+            if leftover <= 0:
                 return "deadline" if time.monotonic() >= deadline else "swap"
+            slice_task = asyncio.create_task(consume_slice(stop_at=stop_at))
+            # Do not use wait_for. Official subscribe aclose often swallows
+            # CancelledError; wait_for then never returns and window 1 sticks.
+            timeout_task = asyncio.create_task(asyncio.sleep(leftover))
+            try:
+                done, _pending = await asyncio.wait(
+                    {slice_task, timeout_task},
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
             except asyncio.CancelledError:
+                await _abandon_task(timeout_task)
                 await _abandon_task(slice_task)
                 raise
+            if timeout_task in done:
+                await _abandon_task(slice_task)
+                return "deadline" if time.monotonic() >= deadline else "swap"
+            await _abandon_task(timeout_task)
+            if slice_task.done() and not slice_task.cancelled():
+                with contextlib.suppress(Exception):
+                    slice_task.result()
             if not kill.allow_new_intents():
                 if listing_may_continue():
                     leftover = min(deadline, stop_at) - time.monotonic()
-                    if leftover > 0:
-                        await asyncio.sleep(leftover)
+                    if await sleep_while_listing_paused(
+                        leftover,
+                        should_resume=kill.allow_new_intents,
+                    ):
+                        continue
                     return "swap" if time.monotonic() < deadline else "deadline"
                 return "halt"
             # subscribe ended; REST already probed; try again until swap
@@ -1414,7 +1579,7 @@ async def run_paper(
             return
         while True:
             if read_control(data_dir).paused:
-                write_paper_stats(stats_path, stats)
+                persist_stats()
                 await asyncio.sleep(min(0.25, poll_s if poll_s > 0 else 0.25))
                 continue
             target = effective_rotate_s(data_dir, rotate_s)
@@ -1455,7 +1620,7 @@ async def run_paper(
                     raise_if_all_fail=False,
                 )
             refresh_watch_board()
-            write_paper_stats(stats_path, stats)
+            persist_stats()
             rotated.set()
 
     async def watch_silence() -> None:
@@ -1466,9 +1631,11 @@ async def run_paper(
                 continue
             now_ms = _now_ms()
             if not kill.allow_new_intents():
+                # Human Start writes sqlite from the UI process. Do not
+                # re-trip ws_stale from a stale stream age on this tick.
                 kill.evaluate(
                     daily_pnl=portfolio.daily_pnl,
-                    ws_age_ms=heartbeat.age_ms(now_ms),
+                    ws_age_ms=0,
                     now_ms=now_ms,
                 )
                 continue
@@ -1479,16 +1646,18 @@ async def run_paper(
                 if await rest_probe_watch() == 0:
                     trip_dead_stream()
                 continue
+            # Stream age must not trip ws_stale. Official subscribe often
+            # dies after list/aclose while REST books still work.
             kill.evaluate(
                 daily_pnl=portfolio.daily_pnl,
-                ws_age_ms=age,
+                ws_age_ms=0,
                 now_ms=now_ms,
             )
 
     def listing_progress(n: int) -> None:
         if window_until > 0:
             stats.list_hold_s = max(0.0, window_until - time.monotonic())
-        write_paper_stats(stats_path, stats)
+        persist_stats()
 
     async def prepare_next_window(after_cursor: str | None) -> Any:
         try:
@@ -1505,12 +1674,38 @@ async def run_paper(
         # finished under 1s rotate, so unique walked froze on one window.
         return window, new_pairs
 
+    async def walk_watch_while_listing() -> None:
+        """REST-walk the current watch slice while the next 5000 lists."""
+        while True:
+            tokens = current_watch_tokens()
+            watched = current_watch_pairs()
+            if tokens:
+                await fetch_book_batches(
+                    client,
+                    tokens,
+                    batch_size=batch_size,
+                    on_ok=make_apply(watched),
+                    on_fail=log_batch_fail,
+                    raise_if_all_fail=False,
+                )
+            await asyncio.sleep(0)
+
+    async def prepare_next_keeping_watch(after_cursor: str | None) -> Any:
+        walker = asyncio.create_task(walk_watch_while_listing())
+        try:
+            return await prepare_next_window(after_cursor)
+        finally:
+            await _abandon_task(walker)
+
     async def run_watch_until(stop_at: float) -> str:
+        remaining = min(deadline, stop_at) - time.monotonic()
+        if remaining <= 0:
+            return "deadline" if time.monotonic() >= deadline else "swap"
+        # Timer first. Swap must not wait for subscribe() to connect.
+        timer = asyncio.create_task(asyncio.sleep(remaining))
         watch = asyncio.create_task(watch_silence())
         rotator = asyncio.create_task(rotate_watch())
         consume = asyncio.create_task(consume_until(stop_at))
-        remaining = min(deadline, stop_at) - time.monotonic()
-        timer = asyncio.create_task(asyncio.sleep(max(0.0, remaining)))
         reason = "deadline"
         try:
             await asyncio.wait(
@@ -1546,20 +1741,25 @@ async def run_paper(
             )
             stats.list_next_queued = True
             stats.list_hold_s = max(0.0, window_until - time.monotonic())
-            write_paper_stats(stats_path, stats)
+            persist_stats()
             # List the next 5000 while the websocket is down so official
             # pages are not starved by subscribe / 1s rotate REST.
             # after_cursor=None wraps to the start of the catalog.
-            prepared = await prepare_next_window(next_after)
+            prepared = await prepare_next_keeping_watch(next_after)
             stats.list_next_queued = False
-            stop_at = (
-                time.monotonic()
-                if hold_s <= 0 or not pairs
-                else window_until
+            leftover = list_hold_remaining_s(
+                now=time.monotonic(),
+                window_until=window_until,
+                hold_s=hold_s,
+                pair_count=len(pairs),
             )
-            stats.list_hold_s = max(0.0, stop_at - time.monotonic())
-            write_paper_stats(stats_path, stats)
-            reason = await run_watch_until(stop_at)
+            stats.list_hold_s = leftover
+            persist_stats()
+            if leftover <= 0:
+                # Listing ate the dwell. Apply the queued window now.
+                reason = "deadline" if time.monotonic() >= deadline else "swap"
+            else:
+                reason = await run_watch_until(time.monotonic() + leftover)
             stats.list_hold_s = 0
             if time.monotonic() >= deadline or reason == "deadline":
                 now_ms = _now_ms()
@@ -1573,7 +1773,7 @@ async def run_paper(
                 now_ms = _now_ms()
                 kill.evaluate(
                     daily_pnl=portfolio.daily_pnl,
-                    ws_age_ms=heartbeat.age_ms(now_ms),
+                    ws_age_ms=0,
                     now_ms=now_ms,
                 )
                 break
@@ -1586,14 +1786,21 @@ async def run_paper(
                 if not new_pairs:
                     stats.list_empty_windows += 1
                     stats.markets_listed = len(window.markets)
-                    persist_list_cursor(window.next_cursor)
                     persist_seen(force=True)
                     refresh_watch_board()
-                    write_paper_stats(stats_path, stats)
-                break
+                # Last page repeated or a one-page catalog. Do not end
+                # the hour. Next list is after_cursor=None (first 5000).
+                stats.list_wraps += 1
+                stats.list_window += 1
+                tracker.set_window(stats.list_window)
+                persist_list_cursor(None)
+                next_after = None
+                persist_stats()
+                continue
             if next_after is None:
                 stats.list_wraps += 1
             stats.list_window += 1
+            tracker.set_window(stats.list_window)
             stats.markets_listed = len(window.markets)
             persist_list_cursor(window.next_cursor)
             next_after = window.next_cursor
@@ -1604,11 +1811,14 @@ async def run_paper(
                 # watch slice and list the next 5000 immediately.
                 stats.list_empty_windows += 1
                 refresh_watch_board()
-                write_paper_stats(stats_path, stats)
+                persist_stats()
                 continue
+            # Settle rests against the current store before retain() drops
+            # those books. Missing-book rests must not pin max_open_pairs.
+            await expire_rests(force_timeout=True)
             replace_pairs(new_pairs)
             stats.universe = len(pairs)
-            write_paper_stats(stats_path, stats)
+            persist_stats()
             await snapshot_current(raise_if_all_fail=False)
             window_started = time.monotonic()
             window_until = (
@@ -1623,5 +1833,5 @@ async def run_paper(
     _sync_tracker_stats(stats, tracker)
     stats.list_next_queued = False
     persist_seen(force=True)
-    write_paper_stats(stats_path, stats)
+    persist_stats()
     return stats

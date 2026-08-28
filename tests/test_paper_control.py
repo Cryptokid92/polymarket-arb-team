@@ -8,7 +8,9 @@ from decimal import Decimal
 from pathlib import Path
 
 from arb.app import WATCH_PAIRS, WATCH_ROTATE_S
-from arb.config import _EnvSettings
+from arb.config import Settings, _EnvSettings
+from arb.killswitch import KillSwitch
+from arb.money import d
 from arb.paper_control import (
     ROTATE_DEFAULT_S,
     ROTATE_MAX_S,
@@ -30,7 +32,7 @@ def test_rotate_defaults_match_watch_slice() -> None:
     assert ROTATE_DEFAULT_S == WATCH_ROTATE_S == 1
     assert ROTATE_MIN_S == 1
     assert ROTATE_MAX_S == 120
-    assert WATCH_PAIRS == 40
+    assert WATCH_PAIRS == 100
 
 
 def test_clamp_rotate_s_is_1_to_120() -> None:
@@ -69,7 +71,7 @@ def test_slider_write_does_not_loosen_caps() -> None:
     assert fields["max_open_pairs"].default == 3
     assert fields["paper_bankroll"].default == Decimal("500")
     assert WATCH_ROTATE_S == 1
-    assert WATCH_PAIRS == 40
+    assert WATCH_PAIRS == 100
 
 
 def test_stop_pauses_without_spawning(tmp_path: Path) -> None:
@@ -137,6 +139,7 @@ def test_stop_and_spawn_source_stay_paper_only() -> None:
     assert "paper_run.py" in inspect.getsource(default_spawn)
     assert "--place-orders" not in inspect.getsource(default_spawn)
     assert "--all-markets" in inspect.getsource(default_spawn)
+    assert "--watch-pairs" in inspect.getsource(default_spawn)
     assert "--list-window-s" in inspect.getsource(default_spawn)
     assert '"60"' in inspect.getsource(default_spawn)
 
@@ -160,6 +163,38 @@ def test_start_resumes_ws_stale_when_no_halt_file(tmp_path: Path) -> None:
     assert restored.halted is False
     assert restored.halt_reason == ""
     assert spawned == [(tmp_path, data_dir)]
+
+
+def test_start_acks_hedge_incidents_so_evaluate_does_not_retrip(
+    tmp_path: Path,
+) -> None:
+    data_dir = tmp_path / "paper"
+    data_dir.mkdir()
+    store = StateStore(data_dir / "state.sqlite")
+    now = 20_000
+    store.record_hedge_incident(now - 300)
+    store.record_hedge_incident(now - 200)
+    store.record_hedge_incident(now - 100)
+    store.set_halted(True, reason="hedge_incidents")
+    apply_control(data_dir, action="start", project_root=tmp_path, spawn=lambda *_: None)
+    assert store.restore().halted is False
+    assert store.hedge_resume_ms() is not None
+    ks = KillSwitch(
+        project_root=tmp_path,
+        state=store,
+        settings=Settings(
+            arb_mode="paper",
+            max_notional_per_trade=d("25"),
+            max_daily_loss=d("50"),
+            max_open_pairs=3,
+            min_edge=d("0.01"),
+            max_gap=d("0.08"),
+            stale_ms=400,
+            hedge_timeout_ms=1500,
+            ws_stale_ms=3000,
+        ),
+    )
+    assert ks.evaluate(daily_pnl=d("10"), ws_age_ms=0, now_ms=now + 50) is True
 
 
 def test_start_does_not_resume_when_halt_file_present(tmp_path: Path) -> None:

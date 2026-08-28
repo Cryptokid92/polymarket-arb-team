@@ -20,5 +20,6 @@ Do not put live keys, `.env`, paper fills, or sqlite in this folder.
 | [cursor-batch-books-rotate.md](cursor-batch-books-rotate.md) | Grok 24 Aug 2026 | Batch REST books; rotate a 40-pair watch slice. |
 | [cursor-paper-bankroll-pnl.md](cursor-paper-bankroll-pnl.md) | Grok 24 Aug 2026 | Paper $500 bankroll, fills/PnL, local Start/Stop + rotate slider. |
 | [cursor-paper-trading-helper.md](cursor-paper-trading-helper.md) | 27 Aug 2026 | Near-miss, recorder, honest fills, hot watch, alerts, tape backtest. Task 12 dark. |
+| [cursor-paper-money-path.md](cursor-paper-money-path.md) | 28 Aug 2026 | Milestone 13: miss-vs-absence tape gate + paper maker completeness. Task 12 dark. |
 
 Paper only. No `ALLOW_LIVE`.

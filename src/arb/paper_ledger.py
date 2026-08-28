@@ -6,7 +6,7 @@ import uuid
 from dataclasses import dataclass
 from decimal import Decimal
 
-from arb.backtest import _MissRng, _maker_side_fills, walk_bids
+from arb.backtest import _MissRng, _maker_side_fills, _maker_side_taken, walk_bids
 from arb.books import Book, BookStore
 from arb.fee_agent import MarketFees
 from arb.fees import maker_fee, net_edge_maker, net_edge_taker, pair_taker_fees, taker_fee
@@ -113,6 +113,13 @@ class PaperLedger:
         self.maker_rest_ms = int(maker_rest_ms)
         self._rng = _MissRng(int(rng_seed))
         self._rests: list[RestingPair] = []
+
+    def has_rest(self, condition_id: str) -> bool:
+        return any(rest.intent.gap.condition_id == condition_id for rest in self._rests)
+
+    @property
+    def resting_pairs(self) -> int:
+        return len(self._rests)
 
     def _rejected(
         self,
@@ -335,6 +342,27 @@ class PaperLedger:
             intent, fees, now_ms, filled_side="YES", book=yes
         )
 
+    def _canceled(self, intent: Intent, fees: MarketFees) -> PaperFillResult:
+        pair_fees = pair_fees_for_intent(intent, fees)
+        return PaperFillResult(
+            accepted=True,
+            reject_reason=None,
+            size=intent.size,
+            yes_vwap=intent.gap.yes_vwap,
+            no_vwap=intent.gap.no_vwap,
+            pair_fees=pair_fees,
+            cost=pair_cost(intent, fees),
+            pnl=_ZERO,
+            bankroll=self.bankroll,
+            daily_pnl=self.daily_pnl,
+            path=intent.path,
+            condition_id=intent.gap.condition_id,
+            outcome="canceled",
+            naked=False,
+            hedge_pnl=_ZERO,
+            completed=False,
+        )
+
     async def poll_rests(self, store: BookStore, now_ms: int) -> list[PaperFillResult]:
         """Settle or expire maker rests. No live cancel."""
         results: list[PaperFillResult] = []
@@ -342,10 +370,15 @@ class PaperLedger:
         for rest in self._rests:
             yes = store.get(rest.intent.gap.yes_token_id)
             no = store.get(rest.intent.gap.no_token_id)
-            if yes is None or no is None:
-                still.append(rest)
-                continue
             timed_out = now_ms - rest.posted_ms >= self.maker_rest_ms
+            if yes is None or no is None:
+                # Window swap / retain drops books. Do not hold the
+                # max_open_pairs slot forever; no book means no honest fill.
+                if timed_out:
+                    results.append(self._canceled(rest.intent, rest.fees))
+                else:
+                    still.append(rest)
+                continue
             yes_ok = _maker_side_fills(
                 rest.posted_yes, yes, rest.intent.yes_limit, timed_out
             )
@@ -362,8 +395,19 @@ class PaperLedger:
             if not timed_out:
                 still.append(rest)
                 continue
-            if yes_ok or no_ok:
-                filled_side = "YES" if yes_ok else "NO"
+            yes_taken = _maker_side_taken(rest.posted_yes, yes, rest.intent.yes_limit)
+            no_taken = _maker_side_taken(rest.posted_no, no, rest.intent.no_limit)
+            if yes_taken and no_taken:
+                results.append(
+                    await self._complete_pair(
+                        rest.intent, rest.fees, now_ms, mode="paper"
+                    )
+                )
+                continue
+            if yes_taken or no_taken:
+                # Only a shown take is a naked. Still-at-bid on one side
+                # while the other moved is a cancel, not a hedge.
+                filled_side = "YES" if yes_taken else "NO"
                 book = yes if filled_side == "YES" else no
                 results.append(
                     self._naked_leg(
@@ -375,26 +419,6 @@ class PaperLedger:
                     )
                 )
                 continue
-            pair_fees = pair_fees_for_intent(rest.intent, rest.fees)
-            results.append(
-                PaperFillResult(
-                    accepted=True,
-                    reject_reason=None,
-                    size=rest.intent.size,
-                    yes_vwap=rest.intent.gap.yes_vwap,
-                    no_vwap=rest.intent.gap.no_vwap,
-                    pair_fees=pair_fees,
-                    cost=pair_cost(rest.intent, rest.fees),
-                    pnl=_ZERO,
-                    bankroll=self.bankroll,
-                    daily_pnl=self.daily_pnl,
-                    path=rest.intent.path,
-                    condition_id=rest.intent.gap.condition_id,
-                    outcome="canceled",
-                    naked=False,
-                    hedge_pnl=_ZERO,
-                    completed=False,
-                )
-            )
+            results.append(self._canceled(rest.intent, rest.fees))
         self._rests = still
         return results

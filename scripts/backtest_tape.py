@@ -13,8 +13,39 @@ import json
 import sys
 from pathlib import Path
 
-from arb.backtest import summarize_tape
-from arb.recorder import load_jsonl
+from arb.backtest import replay_tape_path, summarize_tape
+
+
+def format_edge_report(analysis: dict) -> str:
+    histogram = analysis.get("edge_histogram") or {}
+    thresholds = analysis.get("edge_thresholds") or {}
+    lines = [
+        "paper tape edges (miss vs absence)",
+        f"  frames: {analysis.get('frames', 0)}",
+        f"  ask-gap frames (VWAP sum <= 0.99): {analysis.get('ask_gap_frames', 0)}",
+        f"  maker-quote frames: {analysis.get('maker_quote_frames', 0)}",
+        f"  best ask edge: {analysis.get('best_ask_edge')}",
+        f"  decision: {analysis.get('decision')}",
+        "  thresholds:",
+    ]
+    if not thresholds:
+        lines.append("    (none)")
+    else:
+        for key in ("gt_-0.005", "gt_-0.002", "gt_0", "gte_0.01"):
+            lines.append(f"    {key}: {thresholds.get(key, 0)}")
+    lines.append("  edge histogram:")
+    if not histogram:
+        lines.append("    (none)")
+    else:
+        for bucket, count in sorted(histogram.items()):
+            lines.append(f"    {bucket}: {count}")
+    if analysis.get("decision") == "capture":
+        lines.append("  phase: B — tape has taker ask gaps. Capture; do not loosen min_edge.")
+    else:
+        lines.append(
+            "  phase: C — asks stay complete. Maker completeness at min_edge 0.01."
+        )
+    return "\n".join(lines)
 
 
 def format_tape_report(summary: dict) -> str:
@@ -32,6 +63,8 @@ def format_tape_report(summary: dict) -> str:
         lines.append("  stop: net EV is not positive. Do not loosen risk. Do not go live.")
     if summary["verdict"] == "no_tape":
         lines.append("  no recorded books. Run paper_run --record-books or record_books.py.")
+    if summary["verdict"] == "positive":
+        lines.append("  honest tape EV is positive. Task 12 stays dark. No ALLOW_LIVE.")
     return "\n".join(lines)
 
 
@@ -54,10 +87,10 @@ def main(argv: list[str] | None = None) -> int:
         summary = summarize_tape([])
         print(format_tape_report(summary))
         return 0
-    events = load_jsonl(path)
-    summary = summarize_tape(events)
+    analysis, summary = replay_tape_path(path)
+    print(format_edge_report(analysis))
     print(format_tape_report(summary))
-    print(json.dumps(summary, separators=(",", ":")))
+    print(json.dumps({"edges": analysis, "tape": summary}, separators=(",", ":")))
     return 0
 
 

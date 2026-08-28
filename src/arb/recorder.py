@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -38,14 +38,42 @@ def market_side_of(event: dict[str, Any]) -> str:
     return str(side).upper()
 
 
+def iter_jsonl(path: Path) -> Iterator[dict[str, Any]]:
+    """Yield JSONL rows. Do not slurp a 1GB tape into one string."""
+    with Path(path).open(encoding="utf-8") as handle:
+        for line in handle:
+            text = line.strip()
+            if not text or text.startswith("#"):
+                continue
+            yield json.loads(text)
+
+
 def load_jsonl(path: Path) -> list[dict[str, Any]]:
-    rows: list[dict[str, Any]] = []
-    for line in Path(path).read_text(encoding="utf-8").splitlines():
-        text = line.strip()
-        if not text or text.startswith("#"):
-            continue
-        rows.append(json.loads(text))
-    return rows
+    return list(iter_jsonl(path))
+
+
+def events_by_condition(path: Path) -> Iterator[tuple[str, list[dict[str, Any]]]]:
+    """Yield one market's events at a time. Peak RAM is the fattest condition."""
+    offsets: dict[str, list[int]] = {}
+    with Path(path).open("rb") as handle:
+        while True:
+            pos = handle.tell()
+            raw = handle.readline()
+            if not raw:
+                break
+            text = raw.strip()
+            if not text or text.startswith(b"#"):
+                continue
+            event = json.loads(text)
+            cid = str(event.get("condition_id") or "")
+            offsets.setdefault(cid, []).append(pos)
+    with Path(path).open("rb") as handle:
+        for cid, positions in offsets.items():
+            rows: list[dict[str, Any]] = []
+            for pos in positions:
+                handle.seek(pos)
+                rows.append(json.loads(handle.readline()))
+            yield cid, rows
 
 
 def write_jsonl(path: Path, events: Iterable[dict[str, Any]]) -> None:

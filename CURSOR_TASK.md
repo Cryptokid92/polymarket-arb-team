@@ -9,7 +9,7 @@ Paper only. Never place live orders. Do not loosen universe/risk.
 - `measure_pair` walks asks. Thin books have `raw_edge=None` (not top-of-book).
 - Hunt still silent below `min_edge` 0.01.
 - Dashboard / `report_paper` show closest pair and best edge this hour.
-- Caps unchanged: `stale_ms` 400, `max_gap` 0.08, `WATCH_PAIRS` 40, `LIST_SAFETY_CAP` 5000.
+- Caps unchanged: `stale_ms` 400, `max_gap` 0.08, `LIST_SAFETY_CAP` 5000. Watch default is 100 pairs.
 
 ## Check — honest fills + recorder
 

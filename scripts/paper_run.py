@@ -5,7 +5,7 @@ Usage:
   uv run python scripts/paper_run.py --seconds 3600
   uv run python scripts/paper_run.py --all-markets --seconds 3600
   uv run python scripts/paper_run.py --once --data-dir /tmp/paper
-  uv run python scripts/paper_run.py --all-markets --book-batch-size 50 --watch-pairs 40 --watch-rotate-s 1
+  uv run python scripts/paper_run.py --all-markets --book-batch-size 50 --watch-pairs 100 --watch-rotate-s 1
 """
 
 from __future__ import annotations
@@ -192,7 +192,9 @@ async def _run(args: argparse.Namespace, settings, project_root: Path) -> int:
         f" listed={stats.markets_listed}"
         f" universe={stats.universe}"
         f" gaps={stats.gaps}"
+        f" maker_quotes={stats.maker_quotes}"
         f" intents={stats.intents}"
+        f" completed={stats.completed_pairs}"
         f" rejects={stats.rejects}"
         f" bankroll={stats.bankroll}"
         f" daily_pnl={stats.daily_pnl}"

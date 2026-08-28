@@ -264,6 +264,137 @@ async def test_honest_maker_rests_then_fills_after_timeout(tmp_path: Path) -> No
     assert later[0].pnl == Decimal("0.30")
 
 
+@pytest.mark.asyncio
+async def test_missing_books_after_timeout_cancel_rest_and_free_slot(
+    tmp_path: Path,
+) -> None:
+    yes, no, _payload = _load_pair("gap_3c.json")
+    books = BookStore()
+    store = StateStore(tmp_path / "state.sqlite")
+    ledger = PaperLedger(
+        store,
+        bankroll=d("500"),
+        daily_pnl=d("0"),
+        honest=True,
+        maker_rest_ms=400,
+    )
+    first = await ledger.try_fill(
+        _maker_intent(d("10")), FEE_FREE, now_ms=1_000, yes=yes, no=no
+    )
+    assert first.outcome == "resting"
+    assert ledger.resting_pairs == 1
+    still = await ledger.poll_rests(books, now_ms=1_200)
+    assert still == []
+    assert ledger.resting_pairs == 1
+    later = await ledger.poll_rests(books, now_ms=1_400)
+    assert len(later) == 1
+    assert later[0].outcome == "canceled"
+    assert later[0].completed is False
+    assert later[0].naked is False
+    assert later[0].pnl == Decimal("0")
+    assert ledger.resting_pairs == 0
+    assert ledger.bankroll == Decimal("500")
+
+
+def _put_book(
+    store: BookStore,
+    token_id: str,
+    bid: str,
+    ask: str,
+    *,
+    bid_size: str = "10",
+    ask_size: str = "80",
+    ts_ms: int = 1000,
+) -> None:
+    store.apply_snapshot(
+        {
+            "token_id": token_id,
+            "bids": [{"price": bid, "size": bid_size}],
+            "asks": [{"price": ask, "size": ask_size}],
+            "tick": "0.01",
+            "min_order_size": "5",
+            "ts_ms": ts_ms,
+        }
+    )
+
+
+def _bid_maker_intent(size: Decimal) -> Intent:
+    gap = _gap_3c().model_copy(
+        update={
+            "fillable_shares": size,
+            "yes_vwap": d("0.54"),
+            "no_vwap": d("0.41"),
+            "raw_edge": d("0.05"),
+        }
+    )
+    return Intent(
+        gap=gap,
+        path="maker_gtc",
+        size=size,
+        yes_limit=d("0.54"),
+        no_limit=d("0.41"),
+        expected_net_edge=net_edge_maker(d("0.05"), size),
+        taker_fee_yes=d("0"),
+        taker_fee_no=d("0"),
+    )
+
+
+@pytest.mark.asyncio
+async def test_one_sided_still_at_bid_cancels_instead_of_naked(
+    tmp_path: Path,
+) -> None:
+    yes, no, _payload = _load_pair("gap_3c.json")
+    books = BookStore()
+    _put_book(books, yes.token_id, "0.54", "0.55")
+    _put_book(books, no.token_id, "0.41", "0.42")
+    store = StateStore(tmp_path / "state.sqlite")
+    ledger = PaperLedger(
+        store,
+        bankroll=d("500"),
+        daily_pnl=d("0"),
+        honest=True,
+        maker_rest_ms=400,
+    )
+    first = await ledger.try_fill(
+        _bid_maker_intent(d("10")), FEE_FREE, now_ms=1_000, yes=yes, no=no
+    )
+    assert first.outcome == "resting"
+    _put_book(books, no.token_id, "0.40", "0.42", ts_ms=1_400)
+    later = await ledger.poll_rests(books, now_ms=1_400)
+    assert len(later) == 1
+    assert later[0].outcome == "canceled"
+    assert later[0].naked is False
+    assert store.hedge_incidents_since(0) == 0
+    assert ledger.resting_pairs == 0
+
+
+@pytest.mark.asyncio
+async def test_one_sided_take_still_hedges_naked(tmp_path: Path) -> None:
+    yes, no, _payload = _load_pair("gap_3c.json")
+    books = BookStore()
+    _put_book(books, yes.token_id, "0.54", "0.55")
+    _put_book(books, no.token_id, "0.41", "0.42")
+    store = StateStore(tmp_path / "state.sqlite")
+    ledger = PaperLedger(
+        store,
+        bankroll=d("500"),
+        daily_pnl=d("0"),
+        honest=True,
+        maker_rest_ms=400,
+    )
+    first = await ledger.try_fill(
+        _bid_maker_intent(d("10")), FEE_FREE, now_ms=1_000, yes=yes, no=no
+    )
+    assert first.outcome == "resting"
+    _put_book(books, yes.token_id, "0.53", "0.54", ts_ms=1_400)
+    _put_book(books, no.token_id, "0.40", "0.42", ts_ms=1_400)
+    later = await ledger.poll_rests(books, now_ms=1_400)
+    assert len(later) == 1
+    assert later[0].outcome == "naked"
+    assert later[0].naked is True
+    assert store.hedge_incidents_since(0) == 1
+
+
 def test_ledger_never_uses_float_or_secure_client() -> None:
     import arb.paper_ledger as mod
 

@@ -1,4 +1,4 @@
-"""Watch-slice helpers. Do not raise WATCH_PAIRS or LIST_SAFETY_CAP."""
+"""Watch-slice helpers. Do not raise LIST_SAFETY_CAP."""
 
 from __future__ import annotations
 

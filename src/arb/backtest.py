@@ -6,14 +6,17 @@ import random
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from decimal import Decimal
+from pathlib import Path
 from typing import Literal
 
 from arb.books import Book, Level, _reject_float, walk_asks
 from arb.fees import pair_taker_fees, taker_fee
 from arb.hunter import hunt
+from arb.maker import maker_complete_quotes
 from arb.merge import mergeable
 from arb.naked_leg import hedge_plan
-from arb.recorder import BookFrame, frames_from_events
+from arb.nearmiss import NearMissTracker, measure_pair
+from arb.recorder import BookFrame, events_by_condition, frames_from_events
 
 _ONE = Decimal("1")
 _ZERO = Decimal("0")
@@ -77,6 +80,10 @@ class BacktestConfig:
     max_shares: Decimal = Decimal("80")
     starting_capital: Decimal = Decimal("100")
     rng_seed: int = 0
+    maker_complete: bool = True
+    max_gap: Decimal = Decimal("0.08")
+    stale_ms: int = 400
+    max_notional: Decimal = Decimal("25")
 
 
 @dataclass
@@ -122,6 +129,33 @@ def _frame_at_or_before(frames: Sequence[BookFrame], ts_ms: int) -> BookFrame | 
     return chosen
 
 
+def _limit_buy_fill(
+    *,
+    book: Book,
+    size: Decimal,
+    price: Decimal,
+    ts_ms: int,
+    decision_ts_ms: int,
+    side: Literal["YES", "NO"],
+    kind: str,
+) -> FillRecord:
+    """Fill a resting buy at its limit. Not an ask walk. Not mid."""
+    price = _reject_float(price, "limit")
+    return FillRecord(
+        ts_ms=ts_ms,
+        decision_ts_ms=decision_ts_ms,
+        book_ts_ms=book.ts_ms,
+        side=side,
+        size=size,
+        price=price,
+        kind=kind,
+        fill_source="bid",
+        best_bid=_best_bid(book),
+        best_ask=_best_ask(book),
+        ask_vwap=None,
+    )
+
+
 def _buy_fill(
     *,
     book: Book,
@@ -150,6 +184,15 @@ def _buy_fill(
     )
 
 
+def _maker_side_taken(posted: Book, now: Book, limit: Decimal) -> bool:
+    """True when the book shows a take at our limit. Still-at-bid is not a take."""
+    if not now.asks:
+        return False
+    if _ask_size_at(now, limit) < _ask_size_at(posted, limit):
+        return True
+    return now.asks[0].price <= limit
+
+
 def _maker_side_fills(
     posted: Book,
     now: Book,
@@ -162,10 +205,8 @@ def _maker_side_fills(
         return False
     if now.bids and now.bids[0].price >= limit:
         return True
-    if _ask_size_at(now, limit) < _ask_size_at(posted, limit):
-        return True
     # Simple rest model: still at or through our limit after rest → fill.
-    return now.asks[0].price <= limit
+    return _maker_side_taken(posted, now, limit)
 
 
 def _hedge_fill(
@@ -201,6 +242,8 @@ def _hedge_fill(
 def run_backtest(
     events: Sequence[dict],
     config: BacktestConfig | None = None,
+    *,
+    keep_trace: bool = True,
 ) -> BacktestResult:
     cfg = config or BacktestConfig()
     frames = frames_from_events(events)
@@ -217,13 +260,14 @@ def run_backtest(
     i = 0
     while i < len(frames):
         frame = frames[i]
-        decisions.append(
-            DecisionRecord(
-                t_ms=frame.ts_ms,
-                yes_book_ts_ms=frame.yes.ts_ms,
-                no_book_ts_ms=frame.no.ts_ms,
+        if keep_trace:
+            decisions.append(
+                DecisionRecord(
+                    t_ms=frame.ts_ms,
+                    yes_book_ts_ms=frame.yes.ts_ms,
+                    no_book_ts_ms=frame.no.ts_ms,
+                )
             )
-        )
         gap = hunt(
             frame.yes,
             frame.no,
@@ -232,45 +276,88 @@ def run_backtest(
             cfg.max_shares,
             now_ms=frame.ts_ms,
         )
-        if gap is None:
+        quotes = None
+        if gap is None and cfg.maker_complete:
+            quotes = maker_complete_quotes(
+                frame.yes,
+                frame.no,
+                min_edge=cfg.min_edge,
+                max_gap=cfg.max_gap,
+                min_size=cfg.min_size,
+                max_notional=cfg.max_notional,
+                stale_ms=cfg.stale_ms,
+                now_ms=frame.ts_ms,
+            )
+        if gap is None and quotes is None:
             i += 1
             continue
 
-        delay = cfg.maker_rest_ms if cfg.path == "maker_gtc" else cfg.latency_ms
+        path = "maker_gtc" if quotes is not None else cfg.path
+        yes_limit = quotes.yes_bid if quotes is not None else gap.yes_vwap
+        no_limit = quotes.no_bid if quotes is not None else gap.no_vwap
+        size = quotes.size if quotes is not None else gap.fillable_shares
+        delay = cfg.maker_rest_ms if path == "maker_gtc" else cfg.latency_ms
         exec_ts = frame.ts_ms + delay
         exec_frame = _frame_at_or_before(frames, exec_ts) or frame
-        size = gap.fillable_shares
 
-        if cfg.path == "maker_gtc":
+        if path == "maker_gtc":
             rested = exec_ts - frame.ts_ms >= cfg.maker_rest_ms
             yes_ok = _maker_side_fills(
-                frame.yes, exec_frame.yes, gap.yes_vwap, rested
+                frame.yes, exec_frame.yes, yes_limit, rested
             )
-            no_ok = _maker_side_fills(frame.no, exec_frame.no, gap.no_vwap, rested)
-            yes_fill = (
-                _buy_fill(
-                    book=exec_frame.yes,
-                    size=size,
-                    ts_ms=exec_ts,
-                    decision_ts_ms=frame.ts_ms,
-                    side="YES",
-                    kind=kind,
+            no_ok = _maker_side_fills(frame.no, exec_frame.no, no_limit, rested)
+            if quotes is not None:
+                yes_fill = (
+                    _limit_buy_fill(
+                        book=exec_frame.yes,
+                        size=size,
+                        price=yes_limit,
+                        ts_ms=exec_ts,
+                        decision_ts_ms=frame.ts_ms,
+                        side="YES",
+                        kind=path,
+                    )
+                    if yes_ok
+                    else None
                 )
-                if yes_ok
-                else None
-            )
-            no_fill = (
-                _buy_fill(
-                    book=exec_frame.no,
-                    size=size,
-                    ts_ms=exec_ts,
-                    decision_ts_ms=frame.ts_ms,
-                    side="NO",
-                    kind=kind,
+                no_fill = (
+                    _limit_buy_fill(
+                        book=exec_frame.no,
+                        size=size,
+                        price=no_limit,
+                        ts_ms=exec_ts,
+                        decision_ts_ms=frame.ts_ms,
+                        side="NO",
+                        kind=path,
+                    )
+                    if no_ok
+                    else None
                 )
-                if no_ok
-                else None
-            )
+            else:
+                yes_fill = (
+                    _buy_fill(
+                        book=exec_frame.yes,
+                        size=size,
+                        ts_ms=exec_ts,
+                        decision_ts_ms=frame.ts_ms,
+                        side="YES",
+                        kind=kind,
+                    )
+                    if yes_ok
+                    else None
+                )
+                no_fill = (
+                    _buy_fill(
+                        book=exec_frame.no,
+                        size=size,
+                        ts_ms=exec_ts,
+                        decision_ts_ms=frame.ts_ms,
+                        side="NO",
+                        kind=kind,
+                    )
+                    if no_ok
+                    else None
+                )
         else:
             yes_fill = _buy_fill(
                 book=exec_frame.yes,
@@ -299,10 +386,12 @@ def run_backtest(
         yes_sz = yes_fill.size if yes_fill is not None else _ZERO
         no_sz = no_fill.size if no_fill is not None else _ZERO
         if yes_fill is not None:
-            fills.append(yes_fill)
+            if keep_trace:
+                fills.append(yes_fill)
             buy_notional += yes_fill.price * yes_fill.size
         if no_fill is not None:
-            fills.append(no_fill)
+            if keep_trace:
+                fills.append(no_fill)
             buy_notional += no_fill.price * no_fill.size
 
         fees = _ZERO
@@ -356,7 +445,8 @@ def run_backtest(
                 decision_ts_ms=frame.ts_ms,
                 slippage=cfg.hedge_slippage,
             )
-            fills.append(hedge)
+            if keep_trace:
+                fills.append(hedge)
             pnl += proceeds - (buy_px * plan.size)
 
         i += 1
@@ -374,6 +464,64 @@ def run_backtest(
         fills=fills,
         decisions=decisions,
     )
+
+
+def analyze_tape_edges(
+    events: Sequence[dict],
+    *,
+    min_edge: Decimal = Decimal("0.01"),
+    min_size: Decimal = Decimal("5"),
+    max_shares: Decimal = Decimal("80"),
+    max_gap: Decimal = Decimal("0.08"),
+    stale_ms: int = 400,
+    max_notional: Decimal = Decimal("25"),
+) -> dict[str, object]:
+    """Miss vs absence: did any frame have an ask VWAP sum <= 1 - min_edge?"""
+    frames = frames_from_events(events)
+    tracker = NearMissTracker()
+    ask_gap_frames = 0
+    maker_frames = 0
+    for frame in frames:
+        min_sz = frame.yes.min_order_size
+        if frame.no.min_order_size > min_sz:
+            min_sz = frame.no.min_order_size
+        if min_sz < min_size:
+            min_sz = min_size
+        miss = measure_pair(
+            frame.yes,
+            frame.no,
+            min_sz,
+            max_shares,
+            frame.ts_ms,
+            condition_id="",
+            in_watch=True,
+        )
+        tracker.observe(miss)
+        if miss.raw_edge is not None and miss.raw_edge >= min_edge:
+            ask_gap_frames += 1
+        quotes = maker_complete_quotes(
+            frame.yes,
+            frame.no,
+            min_edge=min_edge,
+            max_gap=max_gap,
+            min_size=min_sz,
+            max_notional=max_notional,
+            stale_ms=stale_ms,
+            now_ms=frame.ts_ms,
+        )
+        if quotes is not None:
+            maker_frames += 1
+    snap = tracker.snapshot()
+    decision = "capture" if ask_gap_frames > 0 else "maker_completeness"
+    return {
+        "frames": len(frames),
+        "ask_gap_frames": ask_gap_frames,
+        "maker_quote_frames": maker_frames,
+        "best_ask_edge": snap["best_edge"],
+        "edge_histogram": snap["edge_histogram"],
+        "edge_thresholds": snap["edge_thresholds"],
+        "decision": decision,
+    }
 
 
 def summarize_tape(
@@ -402,3 +550,107 @@ def summarize_tape(
         "capital_turns": str(result.capital_turns),
         "verdict": verdict,
     }
+
+
+def replay_tape_path(
+    path: Path,
+    config: BacktestConfig | None = None,
+) -> tuple[dict[str, object], dict[str, object]]:
+    """Analyze + backtest one condition at a time. Do not load a 1GB tape."""
+    cfg = config or BacktestConfig()
+    tracker = NearMissTracker()
+    frames_n = 0
+    ask_gap_frames = 0
+    maker_frames = 0
+    events_n = 0
+    trades = 0
+    completed = 0
+    naked = 0
+    pnl = _ZERO
+    buy_notional = _ZERO
+    saw_any = False
+    for _cid, events in events_by_condition(path):
+        saw_any = True
+        events_n += len(events)
+        frames = frames_from_events(events)
+        frames_n += len(frames)
+        for frame in frames:
+            min_sz = frame.yes.min_order_size
+            if frame.no.min_order_size > min_sz:
+                min_sz = frame.no.min_order_size
+            if min_sz < cfg.min_size:
+                min_sz = cfg.min_size
+            miss = measure_pair(
+                frame.yes,
+                frame.no,
+                min_sz,
+                cfg.max_shares,
+                frame.ts_ms,
+                condition_id="",
+                in_watch=True,
+            )
+            tracker.observe(miss)
+            if miss.raw_edge is not None and miss.raw_edge >= cfg.min_edge:
+                ask_gap_frames += 1
+            quotes = maker_complete_quotes(
+                frame.yes,
+                frame.no,
+                min_edge=cfg.min_edge,
+                max_gap=cfg.max_gap,
+                min_size=min_sz,
+                max_notional=cfg.max_notional,
+                stale_ms=cfg.stale_ms,
+                now_ms=frame.ts_ms,
+            )
+            if quotes is not None:
+                maker_frames += 1
+        result = run_backtest(events, cfg, keep_trace=False)
+        trades += result.trades
+        completed += result.completed_pairs
+        naked += result.naked_incidents
+        pnl += result.net_pnl
+        buy_notional += result.capital_turns * cfg.starting_capital
+    if not saw_any:
+        return (
+            {
+                "frames": 0,
+                "ask_gap_frames": 0,
+                "maker_quote_frames": 0,
+                "best_ask_edge": None,
+                "edge_histogram": {},
+                "edge_thresholds": {},
+                "decision": "maker_completeness",
+            },
+            {
+                "events": 0,
+                "trades": 0,
+                "completed_pairs": 0,
+                "naked_incidents": 0,
+                "net_pnl": "0",
+                "capital_turns": "0",
+                "verdict": "no_tape",
+            },
+        )
+    snap = tracker.snapshot()
+    decision = "capture" if ask_gap_frames > 0 else "maker_completeness"
+    capital = cfg.starting_capital
+    turns = buy_notional / capital if capital > _ZERO else _ZERO
+    analysis = {
+        "frames": frames_n,
+        "ask_gap_frames": ask_gap_frames,
+        "maker_quote_frames": maker_frames,
+        "best_ask_edge": snap["best_edge"],
+        "edge_histogram": snap["edge_histogram"],
+        "edge_thresholds": snap["edge_thresholds"],
+        "decision": decision,
+    }
+    summary = {
+        "events": events_n,
+        "trades": trades,
+        "completed_pairs": completed,
+        "naked_incidents": naked,
+        "net_pnl": str(pnl),
+        "capital_turns": str(turns),
+        "verdict": "positive" if pnl > _ZERO else "non_positive",
+    }
+    return analysis, summary

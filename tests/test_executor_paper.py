@@ -17,6 +17,7 @@ from arb.books import BookStore
 from arb.config import Settings
 from arb.executor import LiveBroker, PaperBroker
 from arb.fee_agent import MarketFees
+from arb.hunter import hunt
 from arb.money import d
 from arb.risk import MarketFlags, Portfolio
 
@@ -128,8 +129,12 @@ def test_pipeline_gap_3c_produces_maker_gtc() -> None:
     assert intent.size * (intent.yes_limit + intent.no_limit) <= d("25")
 
 
-def test_pipeline_no_gap_produces_none() -> None:
+def test_pipeline_no_gap_uses_maker_completeness() -> None:
     yes, no, payload = _load_pair("no_gap.json")
+    found = hunt(yes, no, d("0.01"), yes.min_order_size, d("50"), now_ms=1000)
+    assert found is None
     intent = run_pipeline(yes, no, _settings(), _flags(), CRYPTO, _portfolio(), now_ms=1000)
-    assert intent is None
+    assert intent is not None
+    assert intent.path == "maker_gtc"
+    assert intent.yes_limit + intent.no_limit == d("0.98")
     assert payload["yes"]["asks"][0]["price"] == "0.50"
