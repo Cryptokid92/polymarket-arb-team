@@ -167,6 +167,10 @@ Live is allowed only when **both** are true:
 
 `LiveBroker` raises without that gate. With the gate it still raises: live SDK calls are not implemented. Task 12 (live path) is not built. Do not enable live. Do not create `ALLOW_LIVE`. Cursor reviews must not flip the gate.
 
+`paper_run.py` only builds `AsyncPublicClient`. Keys in `.env` do not place orders. Connecting an account does not make this a live bot.
+
+Paper `daily_pnl` is not a CLOB account. PR 30’s rest model marks both legs filled when the bid is still showing after `maker_rest_ms`. On a real book those GTCs usually sit unfilled, or fill one side (naked + hedge). Hunt booked as `maker_gtc` at ask VWAPs is a take if it ever hits the book — makers-pay-0 does not apply. Do not collect that paper PnL. Do not point this at a funded wallet.
+
 Paper preflight skips secrets and geoblock. Live preflight would check the date file, keys, caps, and an injected geoblock fetcher. Default tests stay offline.
 
 ## Known paper-run issues
