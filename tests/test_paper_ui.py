@@ -60,7 +60,7 @@ def test_summarize_fixture_counts(tmp_path: Path) -> None:
     assert summary["paper"]["bankroll"] == "500"
     assert summary["paper"]["daily_pnl"] == "0"
     assert summary["recent_fills"] == []
-    assert summary["control"]["rotate_s"] == 90
+    assert summary["control"]["rotate_s"] == 10
     assert summary["reject_reasons"] == {
         "neg_risk": 1,
         "short_crypto_window": 1,
@@ -319,6 +319,7 @@ def test_write_paper_stats_has_no_account_fields(tmp_path: Path) -> None:
         "closest_thin": None,
         "nearmiss_considers": 0,
         "edge_histogram": {},
+        "watch": [],
         "heartbeat_ms": 1_700_000_000_123,
     }
     blob = path.read_text(encoding="utf-8")
@@ -494,6 +495,64 @@ def test_dashboard_reads_bankroll_pnl_and_fills(tmp_path: Path) -> None:
     page = ui.render_html(summary)
     assert "500.30" in page
     assert "earned" in page
+
+
+def test_html_uses_fullscreen_board_and_histogram_bars(tmp_path: Path) -> None:
+    ui = _load_script()
+    paper = tmp_path / "paper"
+    paper.mkdir()
+    write_paper_stats(
+        paper / "stats.json",
+        PaperRunStats(
+            markets_listed=80,
+            universe=12,
+            watching=40,
+            nearmiss_considers=9,
+            best_edge=Decimal("-0.001"),
+            closest_condition_id="c-near",
+            closest_fillable=Decimal("5"),
+            closest_book_age_ms=80,
+            closest_in_watch=False,
+            edge_histogram={"lt_-0.05": 8, "-0.01_0": 1, "none": 0},
+            watch=[
+                {
+                    "condition_id": "c-hot",
+                    "label": "Will it rain?",
+                    "pinned": True,
+                    "raw_edge": "-0.001",
+                },
+                {
+                    "condition_id": "c-rot",
+                    "label": "rotating-market",
+                    "pinned": False,
+                    "raw_edge": None,
+                },
+            ],
+        ),
+        now_ms=1_700_000_000_500,
+    )
+    summary = ui.summarize_dashboard(paper, project_root=tmp_path, now_ms=1_700_000_000_500)
+    assert summary["paper"]["watching"] == 40
+    assert summary["paper"]["nearmiss_considers"] == 9
+    assert summary["paper"]["watch"][0]["label"] == "Will it rain?"
+    page = ui.render_html(summary)
+    assert "Watching now" in page
+    assert "Will it rain?" in page
+    assert "c-hot" in page
+    assert "c-rot" in page
+    assert 'class="watch-kind">pin' in page
+    assert 'class="watch-kind">rot' in page
+    assert "panel-watch" in page
+    assert "grid-row: 1 / span 2" in page
+    assert "panel-logs" in page
+    assert 'class="board"' in page
+    assert "100vh" in page
+    assert "data-bucket=" in page
+    assert "lt_-0.05" in page
+    assert "c-near" in page
+    assert "Closest book this hour" in page
+    assert "not halted" in page
+    assert "HALTED" not in page
 
 
 def test_http_control_stop_and_slider(tmp_path: Path) -> None:

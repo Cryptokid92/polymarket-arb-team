@@ -20,7 +20,7 @@ PID_FILENAME = "paper_run.pid"
 ROTATE_MIN_S = 10
 ROTATE_MAX_S = 120
 # Same default as arb.app.WATCH_ROTATE_S. Do not import app (cycle).
-ROTATE_DEFAULT_S = 90
+ROTATE_DEFAULT_S = 10
 
 SpawnFn = Callable[[Path, Path], None]
 

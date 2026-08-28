@@ -15,6 +15,7 @@ import sqlite3
 import sys
 import time
 from collections import Counter
+from decimal import Decimal, InvalidOperation
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
@@ -360,12 +361,17 @@ def summarize_dashboard(
     daily_pnl = "0"
     completed_pairs = 0
     naked_incidents = 0
+    watching = 0
+    nearmiss_considers = 0
+    watch_rows: list[dict[str, Any]] = []
     best_edge = None
     closest: dict[str, Any] | None = None
     edge_histogram: dict[str, Any] = {}
     if stats is not None:
         markets_listed = _int_or_zero(stats.get("markets_listed"))
         universe = _int_or_zero(stats.get("universe"))
+        watching = _int_or_zero(stats.get("watching"))
+        nearmiss_considers = _int_or_zero(stats.get("nearmiss_considers"))
         jsonl_gaps = max(jsonl_gaps, _int_or_zero(stats.get("gaps")))
         jsonl_intents = max(jsonl_intents, _int_or_zero(stats.get("intents")))
         jsonl_rejects = max(jsonl_rejects, _int_or_zero(stats.get("rejects")))
@@ -385,6 +391,21 @@ def summarize_dashboard(
         hist = stats.get("edge_histogram")
         if isinstance(hist, dict):
             edge_histogram = {str(key): _int_or_zero(value) for key, value in hist.items()}
+        raw_watch = stats.get("watch")
+        if isinstance(raw_watch, list):
+            for row in raw_watch:
+                if not isinstance(row, dict) or not row.get("condition_id"):
+                    continue
+                watch_rows.append(
+                    {
+                        "condition_id": str(row.get("condition_id")),
+                        "label": str(row.get("label") or row.get("condition_id")),
+                        "pinned": row.get("pinned") is True,
+                        "raw_edge": (
+                            None if row.get("raw_edge") is None else str(row.get("raw_edge"))
+                        ),
+                    }
+                )
         if stats.get("closest_condition_id"):
             closest = {
                 "condition_id": stats.get("closest_condition_id"),
@@ -453,9 +474,12 @@ def summarize_dashboard(
             "daily_pnl": daily_pnl,
             "completed_pairs": completed_pairs,
             "naked_incidents": naked_incidents,
+            "watching": watching,
+            "nearmiss_considers": nearmiss_considers,
             "best_edge": best_edge,
             "closest": closest,
             "edge_histogram": edge_histogram,
+            "watch": watch_rows,
         },
         "closest": closest,
         "best_edge": best_edge,
@@ -501,6 +525,19 @@ def _age_label(age_ms: int | None) -> str:
     return f"{hours:.1f}h ago"
 
 
+_HIST_ORDER: tuple[tuple[str, str, str], ...] = (
+    ("lt_-0.05", "< −5¢", "cold"),
+    ("-0.05_-0.02", "−5 to −2¢", "cold"),
+    ("-0.02_-0.01", "−2 to −1¢", "cool"),
+    ("-0.01_0", "−1 to 0¢", "close"),
+    ("0_0.005", "0 to +0.5¢", "near"),
+    ("0.005_0.01", "+0.5 to +1¢", "near"),
+    ("0.01_0.02", "+1 to +2¢", "hot"),
+    ("gte_0.02", "≥ +2¢", "hot"),
+    ("none", "thin", "thin"),
+)
+
+
 def _rows_html(rows: list[dict[str, Any]], columns: list[tuple[str, str]]) -> str:
     if not rows:
         return '<p class="empty">None yet. The runner has not written this log.</p>'
@@ -509,7 +546,140 @@ def _rows_html(rows: list[dict[str, Any]], columns: list[tuple[str, str]]) -> st
     for row in rows:
         cells = "".join(f"<td>{_esc(row.get(key))}</td>" for _title, key in columns)
         body_parts.append(f"<tr>{cells}</tr>")
-    return f"<table><thead><tr>{head}</tr></thead><tbody>{''.join(body_parts)}</tbody></table>"
+    return (
+        f'<table class="sheet"><thead><tr>{head}</tr></thead>'
+        f"<tbody>{''.join(body_parts)}</tbody></table>"
+    )
+
+
+def _parse_decimal(value: object) -> Decimal | None:
+    if value is None or value == "":
+        return None
+    try:
+        return Decimal(str(value))
+    except (InvalidOperation, TypeError, ValueError):
+        return None
+
+
+def _edge_tone(raw: object) -> str:
+    edge = _parse_decimal(raw)
+    if edge is None:
+        return "muted"
+    if edge >= Decimal("0.01"):
+        return "hot"
+    if edge >= Decimal("0"):
+        return "near"
+    if edge >= Decimal("-0.01"):
+        return "close"
+    return "cold"
+
+
+def _edge_meter_html(raw: object) -> str:
+    """Visual walk from cold books toward hunt. Does not change min_edge."""
+    lo = Decimal("-0.05")
+    hi = Decimal("0.02")
+    hunt = Decimal("0.01")
+    span = hi - lo
+    edge = _parse_decimal(raw)
+    if edge is None:
+        return '<div class="meter empty-meter">No walked edge yet</div>'
+    clamped = min(hi, max(lo, edge))
+    pct = int((clamped - lo) * Decimal(100) / span)
+    hunt_pct = int((hunt - lo) * Decimal(100) / span)
+    need = hunt - edge
+    need_q = need.quantize(Decimal("0.0001"))
+    need_label = f"need {need_q:+} to hunt" if need > 0 else "at or above min_edge"
+    return (
+        f'<div class="meter" aria-label="edge meter">'
+        f'<div class="meter-track">'
+        f'<div class="meter-hunt" style="left:{hunt_pct}%"></div>'
+        f'<div class="meter-dot { _edge_tone(edge) }" style="left:{pct}%"></div>'
+        f"</div>"
+        f'<div class="meter-scale"><span>−5¢</span><span>hunt +1¢</span><span>+2¢</span></div>'
+        f'<p class="meter-need">{_esc(need_label)}</p>'
+        f"</div>"
+    )
+
+
+def _bar_track(count: int, peak: int, tone: str, label: str, raw_key: str) -> str:
+    width = 0
+    if peak > 0 and count > 0:
+        width = min(100, max(2, int(Decimal(count) * Decimal(100) / Decimal(peak))))
+    return (
+        f'<div class="bar" data-bucket="{_esc(raw_key)}">'
+        f'<div class="bar-meta"><span class="bar-label">{_esc(label)}</span>'
+        f'<span class="bar-key">{_esc(raw_key)}</span>'
+        f'<span class="bar-n">{_esc(count)}</span></div>'
+        f'<div class="bar-track"><div class="bar-fill {tone}" style="width:{width}%"></div></div>'
+        f"</div>"
+    )
+
+
+def _hist_bars_html(histogram: dict[str, Any]) -> str:
+    counts = {str(key): _int_or_zero(value) for key, value in histogram.items()}
+    ordered_keys = [key for key, _label, _tone in _HIST_ORDER]
+    extras = [key for key in counts if key not in ordered_keys]
+    peak = max([counts.get(key, 0) for key in (*ordered_keys, *extras)], default=0)
+    if peak <= 0 and not counts:
+        return '<p class="empty">No walked books yet. Near-misses are not gaps.</p>'
+    parts: list[str] = []
+    for key, label, tone in _HIST_ORDER:
+        parts.append(_bar_track(counts.get(key, 0), peak, tone, label, key))
+    for key in extras:
+        parts.append(_bar_track(counts[key], peak, "thin", key, key))
+    return f'<div class="bars">{"".join(parts)}</div>'
+
+
+def _reason_bars_html(reasons: dict[str, Any]) -> str:
+    if not reasons:
+        return (
+            '<table class="sheet"><thead><tr><th>reason</th><th>count</th></tr></thead>'
+            '<tbody><tr><td colspan="2" class="empty">None</td></tr></tbody></table>'
+        )
+    peak = max((_int_or_zero(count) for count in reasons.values()), default=0)
+    rows = "".join(
+        f"<tr><td>{_esc(reason)}</td><td>{_esc(count)}</td></tr>"
+        for reason, count in reasons.items()
+    )
+    bars = "".join(
+        _bar_track(_int_or_zero(count), peak, "cool", str(reason), str(reason))
+        for reason, count in reasons.items()
+    )
+    return (
+        f'<div class="bars">{bars}</div>'
+        f'<table class="sheet reason-table"><thead><tr><th>reason</th><th>count</th></tr></thead>'
+        f"<tbody>{rows}</tbody></table>"
+    )
+
+
+def _watch_html(rows: list[dict[str, Any]]) -> str:
+    if not rows:
+        return '<p class="empty">No watch slice yet. The runner has not subscribed.</p>'
+    parts: list[str] = []
+    for row in rows:
+        tone = _edge_tone(row.get("raw_edge"))
+        kind = "pin" if row.get("pinned") else "rot"
+        kind_label = "pin" if row.get("pinned") else "rot"
+        edge = row.get("raw_edge")
+        edge_txt = "—" if edge is None else str(edge)
+        parts.append(
+            f'<div class="watch-row {kind} {tone}">'
+            f'<span class="watch-kind">{kind_label}</span>'
+            f'<span class="watch-label" title="{_esc(row.get("condition_id"))}">'
+            f'{_esc(row.get("label"))}</span>'
+            f'<span class="watch-edge">{_esc(edge_txt)}</span>'
+            f'<span class="watch-id">{_esc(row.get("condition_id"))}</span>'
+            f"</div>"
+        )
+    return f'<div class="watch-list">{"".join(parts)}</div>'
+
+
+def _metric(label: str, value: object, *, extra: str = "", tone: str = "") -> str:
+    klass = f"metric {tone}".strip()
+    return (
+        f'<div class="{klass}"><span class="k">{_esc(label)}</span>'
+        f'<span class="v">{_esc(value)}</span>{extra}</div>'
+    )
 
 
 def render_html(summary: dict[str, Any]) -> str:
@@ -525,35 +695,29 @@ def render_html(summary: dict[str, Any]) -> str:
     closest = summary.get("closest") or paper.get("closest")
     best_edge = summary.get("best_edge") or paper.get("best_edge")
     histogram = paper.get("edge_histogram") or {}
+    watching = paper.get("watching", 0)
+    considers = paper.get("nearmiss_considers", 0)
+    watch_rows = paper.get("watch") or []
     pnl_lost = daily_pnl.startswith("-")
     pnl_label = "lost" if pnl_lost else "earned"
     pnl_class = "lost" if pnl_lost else "earned"
     rotate_s = control.get("rotate_s", ROTATE_DEFAULT_S)
     paused = bool(control.get("paused"))
     runner_alive = "yes" if control.get("runner_alive") else "no"
-    reason_rows = (
-        "".join(
-            f"<tr><td>{_esc(reason)}</td><td>{_esc(count)}</td></tr>"
-            for reason, count in reasons.items()
-        )
-        if reasons
-        else '<tr><td colspan="2" class="empty">None</td></tr>'
-    )
-    hist_rows = (
-        "".join(
-            f"<tr><td>{_esc(bucket)}</td><td>{_esc(count)}</td></tr>"
-            for bucket, count in histogram.items()
-        )
-        if histogram
-        else '<tr><td colspan="2" class="empty">None</td></tr>'
-    )
+    edge_tone = _edge_tone(best_edge)
     if closest:
         closest_html = (
-            f'<p>best edge <strong>{_esc(best_edge)}</strong>'
-            f' · pair {_esc(closest.get("condition_id"))}'
-            f' · fillable {_esc(closest.get("fillable"))}'
-            f' · age {_esc(closest.get("book_age_ms"))} ms'
-            f' · in watch {_esc(closest.get("in_watch"))}</p>'
+            f'<div class="hero-edge {edge_tone}">'
+            f'<div class="hero-k">best walked edge</div>'
+            f'<div class="hero-n">{_esc(best_edge if best_edge is not None else "—")}</div>'
+            f"{_edge_meter_html(best_edge)}"
+            f'<div class="hero-chips">'
+            f'<span>pair {_esc(closest.get("condition_id"))}</span>'
+            f'<span>fillable {_esc(closest.get("fillable"))}</span>'
+            f'<span>age {_esc(closest.get("book_age_ms"))} ms</span>'
+            f'<span>watch {_esc(closest.get("in_watch"))}</span>'
+            f'<span>thin {_esc(closest.get("thin"))}</span>'
+            f"</div></div>"
         )
     else:
         closest_html = '<p class="empty">No walked books yet. Near-misses are not gaps.</p>'
@@ -563,44 +727,253 @@ def render_html(summary: dict[str, Any]) -> str:
     sqlite_bit = "yes" if halt.get("sqlite_exists") else "no"
     halt_file_bit = "yes" if halt.get("halt_file") else "no"
     halt_reason = halt.get("halt_reason") or "none"
+    run_status = str(summary["run_status"])
     return f"""<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="utf-8">
   <title>Paper dashboard — completeness arb</title>
   <meta name="robots" content="noindex">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta http-equiv="refresh" content="2">
   <style>
-    :root {{ color-scheme: dark; }}
-    body {{ font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-           margin: 0; background: #111; color: #eee; }}
-    header {{ background: #4a3b00; color: #ffe08a; padding: 12px 16px;
-              border-bottom: 3px solid #e6c15a; font-weight: 700; }}
-    main {{ padding: 16px; max-width: 1100px; }}
-    h2 {{ margin: 20px 0 8px; font-size: 14px; letter-spacing: 0.04em;
-          text-transform: uppercase; color: #9ad; }}
-    .grid {{ display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 8px; }}
-    .card {{ background: #1b1b1b; border: 1px solid #333; padding: 10px; }}
-    .card .n {{ font-size: 28px; }}
-    .status {{ margin: 12px 0; }}
-    .ok {{ color: #8d8; }}
-    .earned {{ color: #8d8; }}
-    .lost {{ color: #f88; }}
-    .halted {{ color: #f88; font-weight: 700; }}
-    .controls button {{ margin-right: 8px; padding: 6px 12px; }}
-    .controls input[type="range"] {{ width: 220px; vertical-align: middle; }}
-    table {{ width: 100%; border-collapse: collapse; background: #1b1b1b; }}
-    th, td {{ text-align: left; padding: 6px 8px; border-bottom: 1px solid #333; }}
-    th {{ color: #aaa; font-weight: 600; }}
-    .empty {{ color: #888; }}
-    footer {{ color: #777; padding: 16px; font-size: 12px; }}
+    :root {{
+      color-scheme: dark;
+      --bg: #07090d;
+      --panel: #10151d;
+      --panel-2: #161d28;
+      --line: #243044;
+      --ink: #e7eef8;
+      --muted: #8b9bb0;
+      --amber: #f5c14a;
+      --amber-dim: #3a2d0a;
+      --cyan: #5eead4;
+      --green: #34d399;
+      --red: #fb7185;
+      --cool: #60a5fa;
+    }}
+    * {{ box-sizing: border-box; }}
+    html, body {{ height: 100%; margin: 0; }}
+    body {{
+      font-family: "Segoe UI", "IBM Plex Sans", system-ui, sans-serif;
+      background:
+        radial-gradient(1200px 600px at 10% -10%, #163047 0%, transparent 50%),
+        radial-gradient(900px 500px at 100% 0%, #2a1d08 0%, transparent 42%),
+        var(--bg);
+      color: var(--ink);
+      overflow: hidden;
+    }}
+    .board {{
+      height: 100vh;
+      height: 100dvh;
+      display: grid;
+      grid-template-rows: auto auto auto minmax(0, 1fr) auto;
+      gap: 10px;
+      padding: 10px 12px 8px;
+    }}
+    header {{
+      background: linear-gradient(90deg, #5a4308, #3a2d0a);
+      color: var(--amber);
+      padding: 8px 14px;
+      border: 1px solid #8a6a1a;
+      border-radius: 10px;
+      font-weight: 800;
+      letter-spacing: 0.04em;
+    }}
+    .top {{
+      display: grid;
+      grid-template-columns: minmax(0, 1.4fr) minmax(280px, 0.7fr);
+      gap: 10px;
+      min-height: 0;
+    }}
+    .status, .controls, .panel {{
+      background: color-mix(in srgb, var(--panel) 88%, transparent);
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      padding: 10px 12px;
+      backdrop-filter: blur(8px);
+    }}
+    .status {{
+      display: flex; flex-wrap: wrap; align-items: center; gap: 10px 16px;
+      font-size: 13px; color: var(--muted);
+    }}
+    .pill {{
+      display: inline-flex; align-items: center; gap: 6px;
+      padding: 3px 9px; border-radius: 999px; font-weight: 700;
+      font-size: 12px; letter-spacing: 0.04em; text-transform: uppercase;
+    }}
+    .pill.running, .pill.recent {{ background: #0f2d22; color: var(--green); }}
+    .pill.paused, .pill.stale, .pill.no_data {{ background: #2a2412; color: var(--amber); }}
+    .ok {{ color: var(--green); }}
+    .earned {{ color: var(--green); }}
+    .lost {{ color: var(--red); }}
+    .halted {{ color: var(--red); font-weight: 700; }}
+    .controls {{
+      display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px;
+    }}
+    .controls h2 {{ margin: 0 8px 0 0; }}
+    .controls button {{
+      background: #1c2736; color: var(--ink); border: 1px solid var(--line);
+      border-radius: 8px; padding: 7px 12px; font-weight: 700; cursor: pointer;
+    }}
+    .controls button:hover {{ border-color: var(--cyan); color: var(--cyan); }}
+    .controls input[type="range"] {{ width: 140px; vertical-align: middle; accent-color: var(--cyan); }}
+    .controls .hint {{ color: var(--muted); font-size: 11px; line-height: 1.35; margin: 0; flex: 1 1 180px; }}
+    h2 {{
+      margin: 0 0 8px; font-size: 11px; letter-spacing: 0.08em;
+      text-transform: uppercase; color: var(--cyan);
+    }}
+    .metrics {{
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(108px, 1fr));
+      gap: 8px;
+    }}
+    .metric, .hero-edge, .panel {{
+      background: color-mix(in srgb, var(--panel) 92%, transparent);
+      border: 1px solid var(--line);
+      border-radius: 12px;
+    }}
+    .metric {{ padding: 8px 10px; min-width: 0; }}
+    .metric .k, .hero-k {{
+      display: block; color: var(--muted); font-size: 10px;
+      letter-spacing: 0.06em; text-transform: uppercase;
+    }}
+    .metric .v {{
+      display: block; font-family: "IBM Plex Mono", ui-monospace, Menlo, Consolas, monospace;
+      font-size: clamp(18px, 2.1vw, 28px); font-weight: 700; line-height: 1.15;
+      margin-top: 2px;
+    }}
+    .metric.wide {{ grid-column: span 1; }}
+    .main {{
+      display: grid;
+      grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr);
+      grid-template-rows: minmax(0, 1fr) auto;
+      gap: 10px;
+      min-height: 0;
+    }}
+    .panel {{
+      padding: 10px 12px; min-height: 0; overflow: auto;
+      display: flex; flex-direction: column;
+    }}
+    .panel-watch {{ grid-column: 1; grid-row: 1 / span 2; overflow: hidden; }}
+    .panel-hist {{ grid-column: 2; grid-row: 1; }}
+    .panel-logs {{
+      grid-column: 2; grid-row: 2; max-height: 28vh;
+      display: grid; grid-template-columns: 1fr 1fr; gap: 8px 14px;
+    }}
+    .panel-logs h2 {{ margin-top: 6px; }}
+    .panel-logs > div > h2:first-child {{ margin-top: 0; }}
+    .panel .bars {{ flex: 1; justify-content: space-evenly; }}
+    .hero-edge {{ padding: 2px 2px 0; flex: 0 0 auto; }}
+    .watch-wrap {{ flex: 1; min-height: 0; display: flex; flex-direction: column; margin-top: 8px; }}
+    .watch-list {{
+      flex: 1; min-height: 0; overflow: auto; display: flex; flex-direction: column; gap: 3px;
+    }}
+    .watch-row {{
+      display: grid; grid-template-columns: 36px minmax(0, 1fr) auto;
+      gap: 8px; align-items: center;
+      background: var(--panel-2); border: 1px solid var(--line); border-radius: 8px;
+      padding: 3px 8px; font-size: 12px;
+    }}
+    .watch-row.pin {{ border-color: #8a6a1a; box-shadow: inset 3px 0 0 var(--amber); }}
+    .watch-kind {{
+      text-transform: uppercase; letter-spacing: 0.06em; font-size: 10px; color: var(--amber);
+      font-weight: 800;
+    }}
+    .watch-row.rot .watch-kind {{ color: var(--cyan); }}
+    .watch-label {{
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ink);
+    }}
+    .watch-edge {{
+      font-family: "IBM Plex Mono", ui-monospace, Menlo, Consolas, monospace;
+      font-weight: 700;
+    }}
+    .watch-row.hot .watch-edge {{ color: var(--green); }}
+    .watch-row.near .watch-edge, .watch-row.close .watch-edge {{ color: var(--amber); }}
+    .watch-row.cold .watch-edge {{ color: var(--red); }}
+    .watch-id {{ display: none; }}
+    .hero-n {{
+      font-family: "IBM Plex Mono", ui-monospace, Menlo, Consolas, monospace;
+      font-size: clamp(28px, 3.6vw, 48px); font-weight: 800; line-height: 1;
+      margin: 2px 0 4px;
+    }}
+    .hero-edge.hot .hero-n {{ color: var(--green); }}
+    .hero-edge.near .hero-n {{ color: var(--amber); }}
+    .hero-edge.close .hero-n {{ color: #fbbf24; }}
+    .hero-edge.cold .hero-n {{ color: var(--red); }}
+    .hero-chips {{ display: flex; flex-wrap: wrap; gap: 6px; }}
+    .hero-chips span {{
+      background: var(--panel-2); border: 1px solid var(--line);
+      border-radius: 999px; padding: 3px 8px; font-size: 11px; color: var(--muted);
+    }}
+    .bars {{ display: flex; flex-direction: column; gap: 6px; }}
+    .bar-meta {{
+      display: grid; grid-template-columns: 1fr auto auto; gap: 8px;
+      font-size: 11px; color: var(--muted);
+    }}
+    .bar-n, .v, td {{ font-variant-numeric: tabular-nums; }}
+    .bar-key {{ color: #6b7c93; font-family: ui-monospace, Menlo, Consolas, monospace; }}
+    .bar-track {{
+      height: 14px; background: #1a2230; border-radius: 99px; overflow: hidden;
+      box-shadow: inset 0 0 0 1px #243044;
+    }}
+    .bar-fill {{ height: 100%; border-radius: 99px; }}
+    .bar-fill.cold {{ background: linear-gradient(90deg, #9f1239, #fb7185); box-shadow: 0 0 12px #fb718866; }}
+    .bar-fill.cool {{ background: linear-gradient(90deg, #1d4ed8, var(--cool)); }}
+    .bar-fill.close {{ background: linear-gradient(90deg, #b45309, #fbbf24); box-shadow: 0 0 12px #fbbf2466; }}
+    .bar-fill.near {{ background: linear-gradient(90deg, #a16207, var(--amber)); box-shadow: 0 0 14px #f5c14a66; }}
+    .bar-fill.hot {{ background: linear-gradient(90deg, #047857, var(--green)); box-shadow: 0 0 14px #34d39966; }}
+    .bar-fill.thin {{ background: #64748b; }}
+    .meter {{ margin: 6px 0 8px; }}
+    .meter-track {{
+      position: relative; height: 16px; border-radius: 99px;
+      background: linear-gradient(90deg, #fb7185 0%, #fbbf24 60%, #34d399 85%, #5eead4 100%);
+      box-shadow: inset 0 0 0 1px #243044;
+    }}
+    .meter-hunt {{
+      position: absolute; top: -3px; bottom: -3px; width: 2px;
+      background: #fff; box-shadow: 0 0 8px #fff;
+    }}
+    .meter-dot {{
+      position: absolute; top: 50%; width: 14px; height: 14px; margin: -7px 0 0 -7px;
+      border-radius: 50%; background: #fff; border: 2px solid #0b0d12;
+      box-shadow: 0 0 0 3px #f5c14a88;
+    }}
+    .meter-scale {{
+      display: flex; justify-content: space-between; color: var(--muted);
+      font-size: 10px; margin-top: 4px;
+    }}
+    .meter-need {{ margin: 6px 0 0; color: var(--amber); font-size: 13px; font-weight: 700; }}
+    .reason-table {{ display: none; }}
+    table.sheet {{ width: 100%; border-collapse: collapse; font-size: 12px; }}
+    th, td {{
+      text-align: left; padding: 5px 6px; border-bottom: 1px solid var(--line);
+      font-family: "IBM Plex Mono", ui-monospace, Menlo, Consolas, monospace;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 28vw;
+    }}
+    th {{ color: var(--muted); font-weight: 600; text-transform: uppercase; font-size: 10px; }}
+    .empty {{ color: var(--muted); }}
+    .reason-table {{ margin-top: 8px; }}
+    footer {{ color: #6b7c93; font-size: 11px; padding: 0 4px; }}
+    @media (max-width: 1100px) {{
+      body {{ overflow: auto; }}
+      .board {{ height: auto; min-height: 100vh; }}
+      .top, .main {{ grid-template-columns: 1fr; grid-template-rows: auto; }}
+      .panel-watch, .panel-hist, .panel-logs {{
+        grid-column: auto; grid-row: auto; max-height: none;
+      }}
+      .panel-logs {{ display: flex; }}
+      .metrics {{ grid-template-columns: repeat(auto-fit, minmax(108px, 1fr)); }}
+    }}
   </style>
 </head>
 <body>
+  <div class="board">
   <header>{_esc(summary["banner"])}</header>
-  <main>
+  <div class="top">
     <div class="status">
-      Run status: <strong>{_esc(summary["run_status"])}</strong>
+      <span class="pill { _esc(run_status) }">{_esc(run_status)}</span>
+      Run status: <strong>{_esc(run_status)}</strong>
       · last event {_esc(_age_label(summary.get("last_event_age_ms")))}
       · halt: <span class="{halt_class}">{halt_label}</span>
       · halt reason: {_esc(halt_reason)}
@@ -608,18 +981,8 @@ def render_html(summary: dict[str, Any]) -> str:
       · sqlite: {sqlite_bit}
       · sources: {_esc(sources)}
     </div>
-    <h2>Paper bankroll (not real money)</h2>
-    <div class="grid">
-      <div class="card">paper bankroll<div class="n">{_esc(bankroll)}</div></div>
-      <div class="card">realized PnL ({pnl_label})<div class="n {pnl_class}">{_esc(daily_pnl)}</div></div>
-      <div class="card">fills<div class="n">{_esc(counts.get("fills", 0))}</div></div>
-      <div class="card">completed pairs<div class="n">{_esc(completed_pairs)}</div></div>
-      <div class="card">naked incidents<div class="n">{_esc(naked_incidents)}</div></div>
-      <div class="card">paused<div class="n">{_esc("yes" if paused else "no")}</div></div>
-      <div class="card">runner<div class="n">{_esc(runner_alive)}</div></div>
-    </div>
-    <h2>Paper controls (127.0.0.1 only)</h2>
     <div class="controls">
+      <h2>Paper controls (127.0.0.1 only)</h2>
       <button type="button" id="btn-start">Start</button>
       <button type="button" id="btn-stop">Stop</button>
       <label>Watch rotate
@@ -627,56 +990,76 @@ def render_html(summary: dict[str, Any]) -> str:
                value="{_esc(rotate_s)}">
         <span id="rotate-val">{_esc(rotate_s)}s</span>
       </label>
-      <p class="empty">Start/Stop pauses or launches paper_run (ARB_MODE=paper).
+      <p class="hint">Start/Stop pauses or launches paper_run (ARB_MODE=paper).
       Slider is watch-slice interval ({ROTATE_MIN_S}–{ROTATE_MAX_S}s). Does not
       change stale_ms, min_edge, max_gap, universe filters, or bankroll rules.
       Stop does not place or cancel live orders.</p>
     </div>
-    <h2>Counts</h2>
-    <div class="grid">
-      <div class="card">markets listed<div class="n">{_esc(counts["markets_listed"])}</div></div>
-      <div class="card">universe<div class="n">{_esc(counts["universe"])}</div></div>
-      <div class="card">gaps<div class="n">{_esc(counts["gaps"])}</div></div>
-      <div class="card">intents<div class="n">{_esc(counts["intents"])}</div></div>
-      <div class="card">rejects<div class="n">{_esc(counts["rejects"])}</div></div>
-    </div>
-    <h2>Closest book this hour</h2>
-    {closest_html}
-    <h2>Edge histogram (walked asks; thin is none)</h2>
-    <table><thead><tr><th>bucket</th><th>count</th></tr></thead>
-    <tbody>{hist_rows}</tbody></table>
-    <h2>Recent near-misses</h2>
-    {_rows_html(summary.get("recent_nearmiss") or [], [
+  </div>
+  <div class="metrics">
+      {_metric("paper bankroll", bankroll, extra='<span class="k">not real money</span>')}
+      {_metric(f"realized PnL ({pnl_label})", daily_pnl, tone=pnl_class)}
+      {_metric("markets listed", counts["markets_listed"])}
+      {_metric("universe", counts["universe"])}
+      {_metric("watching", watching)}
+      {_metric("gaps", counts["gaps"])}
+      {_metric("intents", counts["intents"])}
+      {_metric("rejects", counts["rejects"])}
+      {_metric("fills", counts.get("fills", 0))}
+      {_metric("completed pairs", completed_pairs)}
+      {_metric("naked incidents", naked_incidents)}
+      {_metric("paused", "yes" if paused else "no")}
+      {_metric("runner", runner_alive)}
+  </div>
+  <div class="main">
+    <section class="panel panel-watch">
+      <h2>Closest book this hour</h2>
+      {closest_html}
+      <div class="watch-wrap">
+        <h2>Watching now ({_esc(watching)})</h2>
+        {_watch_html(watch_rows)}
+      </div>
+    </section>
+    <section class="panel panel-hist">
+      <h2>Edge histogram (walked asks; thin is none)</h2>
+      <p class="empty">considers {_esc(considers)} · hunt stays silent below min_edge 0.01</p>
+      {_hist_bars_html(histogram)}
+    </section>
+    <section class="panel panel-logs">
+      <div>
+      <h2>Recent near-misses</h2>
+      {_rows_html(summary.get("recent_nearmiss") or [], [
         ("raw_edge", "raw_edge"),
         ("fillable", "fillable"),
         ("in_watch", "in_watch"),
         ("thin", "thin"),
         ("age", "age"),
         ("condition_id", "condition_id"),
-    ])}
-    <h2>Paper alerts (not live orders)</h2>
-    {_rows_html(summary.get("recent_alerts") or [], [
+      ])}
+      <h2>Paper alerts (not live orders)</h2>
+      {_rows_html(summary.get("recent_alerts") or [], [
         ("path", "path"),
         ("size", "size"),
         ("raw_edge", "raw_edge"),
         ("expected_net_edge", "expected_net_edge"),
         ("outcome", "outcome"),
         ("condition_id", "condition_id"),
-    ])}
-    <h2>Reject reasons</h2>
-    <table><thead><tr><th>reason</th><th>count</th></tr></thead>
-    <tbody>{reason_rows}</tbody></table>
-    <h2>Recent gaps</h2>
-    {_rows_html(summary["recent_gaps"], [
+      ])}
+      </div>
+      <div>
+      <h2>Reject reasons</h2>
+      {_reason_bars_html(reasons)}
+      <h2>Recent gaps</h2>
+      {_rows_html(summary["recent_gaps"], [
         ("raw_edge", "raw_edge"),
         ("yes_vwap", "yes_vwap"),
         ("no_vwap", "no_vwap"),
         ("fillable", "fillable"),
         ("age", "age"),
         ("condition_id", "condition_id"),
-    ])}
-    <h2>Recent fills</h2>
-    {_rows_html(summary.get("recent_fills") or [], [
+      ])}
+      <h2>Recent fills</h2>
+      {_rows_html(summary.get("recent_fills") or [], [
         ("path", "path"),
         ("size", "size"),
         ("pnl", "pnl"),
@@ -684,15 +1067,18 @@ def render_html(summary: dict[str, Any]) -> str:
         ("yes_vwap", "yes_vwap"),
         ("no_vwap", "no_vwap"),
         ("pair_fees", "pair_fees"),
-    ])}
-    <h2>Recent intents</h2>
-    {_rows_html(summary["recent_intents"], [
+      ])}
+      <h2>Recent intents</h2>
+      {_rows_html(summary["recent_intents"], [
         ("path", "path"),
         ("size", "size"),
         ("expected_net_edge", "expected_net_edge"),
-    ])}
-  </main>
+      ])}
+      </div>
+    </section>
+  </div>
   <footer>Paper $500 bankroll is not real money. Binds 127.0.0.1. Auto-refresh 2s. No live path.</footer>
+  </div>
   <script>
     async function postControl(body) {{
       await fetch("/api/control", {{
