@@ -1565,6 +1565,10 @@ async def test_long_run_swaps_to_next_list_window(
     )
     assert client.list_calls >= 2
     assert stats.list_window >= 2
+    assert stats.listed_unique >= 4
+    assert stats.walked_unique >= 2
+    snapshot = json.loads((tmp_path / "paper" / "stats.json").read_text(encoding="utf-8"))
+    assert snapshot["walked_unique"] == stats.walked_unique
     watched = {tid for call in client.subscribe_calls for tid in call}
     assert {"yc", "nc"} & watched or {"ya", "na"} <= watched
 

@@ -855,6 +855,16 @@ async def run_paper(
     stats.list_wraps = saved_wraps
     seen = load_seen_markets(data_dir)
     seen.apply_to(stats)
+    last_saved_walked = seen.walked_unique
+
+    def persist_seen(*, force: bool = False) -> None:
+        nonlocal last_saved_walked
+        seen.apply_to(stats)
+        grew = seen.walked_unique >= last_saved_walked + 25
+        if force or grew:
+            seen.save(data_dir)
+            last_saved_walked = seen.walked_unique
+
     pairs: list[UniversePair] = []
     by_token: dict[str, UniversePair] = {}
     watch_offset = 0
@@ -879,8 +889,7 @@ async def run_paper(
             pair = universe_pair(market)
             seen.note_universe(pair.condition_id)
             kept.append(pair)
-        seen.apply_to(stats)
-        seen.save(data_dir)
+        persist_seen(force=True)
         return kept
 
     def replace_pairs(new_pairs: list[UniversePair]) -> None:
@@ -1010,7 +1019,7 @@ async def run_paper(
         if yes is None or no is None:
             return
         seen.note_walked(pair.condition_id)
-        seen.apply_to(stats)
+        persist_seen()
         now_ms = _now_ms()
         in_watch = pair.condition_id in watch_ids()
         portfolio.halted = not kill.allow_new_intents()
@@ -1176,8 +1185,7 @@ async def run_paper(
         await expire_rests(force_timeout=True)
         _sync_tracker_stats(stats, tracker)
         refresh_watch_board()
-        seen.apply_to(stats)
-        seen.save(data_dir)
+        persist_seen(force=True)
         write_paper_stats(stats_path, stats)
         if recorder is not None:
             recorder.close()
@@ -1353,14 +1361,17 @@ async def run_paper(
             rotate_n = max(1, watch_n - pinned_n)
             watch_offset = (watch_offset + rotate_n) % rest_n
             next_tokens = current_watch_tokens()
-            await fetch_book_batches(
-                client,
-                next_tokens,
-                batch_size=batch_size,
-                on_ok=apply_book_batch,
-                on_fail=log_batch_fail,
-                raise_if_all_fail=False,
-            )
+            # 1s rotate REST starves official list_markets of the next
+            # 5000. Skip those fetches while the next window is listing.
+            if not stats.list_next_queued:
+                await fetch_book_batches(
+                    client,
+                    next_tokens,
+                    batch_size=batch_size,
+                    on_ok=apply_book_batch,
+                    on_fail=log_batch_fail,
+                    raise_if_all_fail=False,
+                )
             refresh_watch_board()
             write_paper_stats(stats_path, stats)
             rotated.set()
@@ -1398,16 +1409,8 @@ async def run_paper(
         except PublicApiError:
             return None
         new_pairs = ingest_markets(window.markets)
-        tokens = pair_token_ids(new_pairs)
-        if tokens:
-            await fetch_book_batches(
-                client,
-                tokens,
-                batch_size=batch_size,
-                on_ok=make_apply(new_pairs),
-                on_fail=log_batch_fail,
-                raise_if_all_fail=False,
-            )
+        # List+ingest only. A full-universe REST snapshot here never
+        # finished under 1s rotate, so unique walked froze on one window.
         return window, new_pairs
 
     async def run_watch(prefetch: asyncio.Task[Any] | None) -> str:
@@ -1474,6 +1477,9 @@ async def run_paper(
                 persist_list_cursor(window.next_cursor)
                 next_after = window.next_cursor
                 stats.list_next_queued = False
+                persist_seen(force=True)
+                write_paper_stats(stats_path, stats)
+                await snapshot_current(raise_if_all_fail=False)
                 continue
             now_ms = _now_ms()
             clean_end = reason == "deadline" or time.monotonic() >= deadline
@@ -1490,7 +1496,6 @@ async def run_paper(
         clear_pid(data_dir)
     _sync_tracker_stats(stats, tracker)
     stats.list_next_queued = False
-    seen.apply_to(stats)
-    seen.save(data_dir)
+    persist_seen(force=True)
     write_paper_stats(stats_path, stats)
     return stats

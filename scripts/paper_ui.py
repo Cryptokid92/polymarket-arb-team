@@ -796,11 +796,23 @@ def render_html(summary: dict[str, Any]) -> str:
         halt_hint = ""
     list_window = paper.get("list_window", 1)
     list_next = paper.get("list_next_queued") is True
+    walked_n = _int_or_zero(walked_unique)
+    universe_n = _int_or_zero(universe_unique)
+    plateau = (
+        list_next
+        and universe_n > 0
+        and walked_n >= universe_n
+    )
     list_note = (
         f"list window {_esc(list_window)}"
         + (" · next 5000 queued" if list_next else "")
         + f" · unique listed {_esc(listed_unique)}"
         + f" · unique walked {_esc(walked_unique)}"
+        + (
+            " · walked this window; waiting on next list pages"
+            if plateau
+            else ""
+        )
     )
     run_status = str(summary["run_status"])
     return f"""<!DOCTYPE html>

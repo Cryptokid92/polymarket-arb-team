@@ -593,6 +593,31 @@ def test_coverage_html_uses_unique_listed_as_scale() -> None:
     assert "No unique markets yet" in empty
 
 
+def test_list_note_explains_walked_plateau_while_next_window_lists(
+    tmp_path: Path,
+) -> None:
+    ui = _load_script()
+    paper = tmp_path / "paper"
+    paper.mkdir()
+    write_paper_stats(
+        paper / "stats.json",
+        PaperRunStats(
+            markets_listed=5000,
+            universe=925,
+            listed_unique=11896,
+            universe_unique=925,
+            walked_unique=944,
+            list_window=3,
+            list_next_queued=True,
+        ),
+        now_ms=1_700_000_000_500,
+    )
+    summary = ui.summarize_dashboard(paper, project_root=tmp_path, now_ms=1_700_000_000_500)
+    page = ui.render_html(summary)
+    assert "waiting on next list pages" in page
+    assert "944" in page
+
+
 def test_http_control_stop_and_slider(tmp_path: Path) -> None:
     ui = _load_script()
     paper = tmp_path / "paper"
