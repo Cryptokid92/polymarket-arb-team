@@ -134,6 +134,51 @@ Do **not** treat the live `daily_pnl` as a tape verdict. Without the recorded bo
 
 `backtest_tape.py` now streams one `condition_id` at a time (`replay_tape_path`) so the next hour tape does not load 1 GB of JSON into RAM.
 
+## Working-bot backup (scan loop only — not the paper PnL)
+
+Two separate things. Do not mix them.
+
+**1. What this repo does if you put keys in `.env`.** Nothing live. `paper_run.py` only builds `AsyncPublicClient`. It never constructs a trading client. `LiveBroker` still raises `live SDK calls are not implemented` even after `ARB_MODE=live` and a dated `ALLOW_LIVE` file. Task 12 was never built. Connecting an account does not turn PR 30 into a live bot.
+
+**2. What those paper “wins” would mean if the same orders actually hit the CLOB.** They would not collect. The ledger marks a rest as filled because the bid was still there after `maker_rest_ms` (400 ms default; this runner used `hedge_timeout_ms`). That is not a seller hitting your GTC.
+
+On a real book:
+
+- You post GTC buys at the bid (example: 49¢ YES and 49¢ NO).
+- Most of the time nobody sells into you. The quotes sit. You earn $0. That is what PR 31 looks like.
+- When you do get filled, it is often one side. You are long YES or long NO, not a complete pair. That is a directional bet plus a hedge, usually a loss after slippage. The kill switch exists because three of those in an hour is supposed to halt you.
+- You get filled more when the market is moving against that bid (adverse selection). PR 30’s model is the opposite: it fills both legs whenever the quote is still pretty.
+
+The other PR 30 lie is worse if hunt ever fires. `choose_intent` prefers `maker_gtc` with zero fees whenever maker EV is positive, so a 3¢ ask gap (asks 0.55 and 0.42) can be booked as a free rest. A live buy at those limits is a take. You pay taker fees. Paper can show about +$2.40; after protocol fees that take can be negative.
+
+| Paper PR 30 | Real book |
+|---|---|
+| Thousands of completed pairs and a large `daily_pnl` (example local board: 2568 pairs, +$1442; this VM hour: 470 pairs, +$257.775) | Almost all unfilled rests |
+| Both legs fill because bids still show | One leg fills, or neither |
+| Maker fees 0 on an ask-priced “GTC” | You are a taker if the limit is at the ask |
+
+PR 31 (`fix/choose-intent-and-tape-fill`) looks “unprofitable” because it stopped writing those fake fills. A live account would look like PR 31, plus naked-leg risk PR 30 never charged.
+
+Do **not** collect PR 30 paper PnL. Do not create `ALLOW_LIVE`. Do not point this at a funded wallet. The paper $500 is not a backtest of an account.
+
+What *was* worth keeping from this VM is the **scan loop** on GitHub `main` `582d66a` (PR #30 squash): watch 100, 1s rotate, 60s 5000-windows, catalog wrap, leftover skip, `ws_age_ms=0`. That tree matches this VM (`f143762` diffs empty). The hour files under `/opt/cursor/artifacts/backups/paper-working-bot-20260828-1133/` are a paper-ledger snapshot only.
+
+This VM hour (11:33–12:33 UTC, no `--record-books`):
+
+| Field | Value |
+|---|---|
+| completed pairs | 470 (paper ledger, not CLOB) |
+| daily_pnl | `257.775` (paper ledger, not CLOB) |
+| gaps | 0 |
+| naked incidents | 0 |
+| list_window / wraps | 66 / 1 |
+| listed / walked unique | 186_608 / 13_755 |
+| watching | 100 |
+| best ask edge | `-0.001` |
+| `gt_0` / `gte_0.01` | 0 / 0 |
+
+There is no `books.jsonl` for this hour. Do not treat `daily_pnl` as a tape verdict. Do not loosen `min_edge`. Task 12 stays dark.
+
 ## Go-live (human, later)
 
-Task 12 stays dark. Agents never create `ALLOW_LIVE`. One positive tape replay is not two separate honest paper hours on a live venue. This host is not a live venue. A missing tape is not a pass.
+Task 12 stays dark. Agents never create `ALLOW_LIVE`. Keys in `.env` do not place orders. One paper `daily_pnl` is not a CLOB account. This host is not a live venue. A missing tape is not a pass.
