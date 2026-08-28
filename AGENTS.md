@@ -2,6 +2,8 @@
 
 This is a **paper-first** public repo. Read this before writing code.
 
+Completeness strategy is **frozen**. Two honest paper hours: 0 completed pairs, hour 2 paper `-0.20` on a naked hedge. Do not add features to make this bot print. Do not lower `min_edge`. Do not restore still-at-bid fills.
+
 ## Mode and live gate
 
 - Paper is the default. `ARB_MODE` defaults to `paper`.
