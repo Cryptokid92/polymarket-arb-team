@@ -60,6 +60,10 @@ PIN_HOT_PAIRS = 8
 # a 1-hour run. 1s * ~32 rotating pairs ≈ one rest-cycle per ~48s on a
 # 1546-pair window. Do not raise WATCH_PAIRS.
 WATCH_ROTATE_S = 1
+# Dwell on one 5000-market window this long, then swap if the next
+# window is listed. Listing runs first (no websocket) so 50 official
+# pages can finish inside the minute. Do not raise LIST_SAFETY_CAP.
+LIST_WINDOW_S = 60
 _SHORT_WINDOW = re.compile(
     r"(?:^|[^0-9])(?:5|15)(?:\s|-)?(?:m(?:in(?:ute)?s?)?)\b",
     re.IGNORECASE,
@@ -123,6 +127,8 @@ class PaperRunStats:
     list_cursor: str | None = None
     list_wraps: int = 0
     list_next_queued: bool = False
+    list_window_s: int = LIST_WINDOW_S
+    list_hold_s: float = 0
     listed_unique: int = 0
     universe_unique: int = 0
     walked_unique: int = 0
@@ -409,6 +415,8 @@ def write_paper_stats(
         "list_cursor": stats.list_cursor,
         "list_wraps": stats.list_wraps,
         "list_next_queued": stats.list_next_queued,
+        "list_window_s": stats.list_window_s,
+        "list_hold_s": stats.list_hold_s,
         "listed_unique": stats.listed_unique,
         "universe_unique": stats.universe_unique,
         "walked_unique": stats.walked_unique,
@@ -797,6 +805,7 @@ async def run_paper(
     book_batch_size: int = BOOK_BATCH_SIZE,
     watch_pairs: int = WATCH_PAIRS,
     watch_rotate_s: float = WATCH_ROTATE_S,
+    list_window_s: float = LIST_WINDOW_S,
     honest: bool = True,
     p_miss: Decimal = Decimal("0.3"),
     rng_seed: int = 0,
@@ -814,6 +823,7 @@ async def run_paper(
     alerts_path = data_dir / "alerts.jsonl"
     stats_path = data_dir / "stats.json"
     stats = PaperRunStats()
+    stats.list_window_s = max(0, int(list_window_s))
     store = BookStore()
     heartbeat = StreamHeartbeat()
     broker = PaperBroker(log_path=intents_path)
@@ -1295,36 +1305,32 @@ async def run_paper(
         if await rest_probe_watch() == 0:
             trip_dead_stream()
 
-    async def consume(prefetch: asyncio.Task[Any] | None = None) -> str:
+    async def consume_until(stop_at: float) -> str:
         while time.monotonic() < deadline:
-            if prefetch is not None and prefetch.done():
+            now = time.monotonic()
+            if now >= stop_at:
                 return "swap"
             rotated.clear()
             slice_task = asyncio.create_task(consume_slice())
             rotate_wait = asyncio.create_task(rotated.wait())
-            remaining = deadline - time.monotonic()
-            wait_for = {slice_task, rotate_wait}
-            if prefetch is not None:
-                wait_for.add(prefetch)
+            remaining = min(deadline, stop_at) - now
             done, pending = await asyncio.wait(
-                wait_for,
+                {slice_task, rotate_wait},
                 timeout=max(0.0, remaining),
                 return_when=asyncio.FIRST_COMPLETED,
             )
             for task in pending:
-                if prefetch is not None and task is prefetch:
-                    continue
                 task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
                     await task
-            if prefetch is not None and prefetch in done:
-                return "swap"
             if slice_task in done and not slice_task.cancelled():
                 if not kill.allow_new_intents():
                     return "halt"
                 continue
             if not done:
-                return "deadline"
+                if time.monotonic() >= deadline:
+                    return "deadline"
+                return "swap"
         return "deadline"
 
     async def rotate_watch() -> None:
@@ -1414,20 +1420,22 @@ async def run_paper(
         # finished under 1s rotate, so unique walked froze on one window.
         return window, new_pairs
 
-    async def run_watch(prefetch: asyncio.Task[Any] | None) -> str:
+    async def run_watch_until(stop_at: float) -> str:
         watch = asyncio.create_task(watch_silence())
         rotator = asyncio.create_task(rotate_watch())
         reason = "deadline"
         try:
-            remaining = deadline - time.monotonic()
+            remaining = min(deadline, stop_at) - time.monotonic()
             if remaining <= 0:
-                return "deadline"
+                return "swap" if time.monotonic() < deadline else "deadline"
             try:
                 reason = await asyncio.wait_for(
-                    consume(prefetch), timeout=remaining
+                    consume_until(stop_at), timeout=max(0.01, remaining)
                 )
             except asyncio.TimeoutError:
-                reason = "deadline"
+                reason = (
+                    "deadline" if time.monotonic() >= deadline else "swap"
+                )
             return reason
         finally:
             rotator.cancel()
@@ -1438,29 +1446,34 @@ async def run_paper(
                 await watch
 
     next_after = listed_window.next_cursor
+    window_started = time.monotonic()
+    hold_s = max(0.0, float(list_window_s))
+    stats.list_window_s = int(hold_s)
     try:
         while time.monotonic() < deadline:
             refresh_watch_board()
-            prefetch = None
+            prepared = None
             if next_after is not None:
                 stats.list_next_queued = True
+                stats.list_hold_s = max(0.0, window_started + hold_s - time.monotonic())
                 write_paper_stats(stats_path, stats)
-                prefetch = asyncio.create_task(prepare_next_window(next_after))
+                # List the next 5000 while the websocket is down so official
+                # pages are not starved by subscribe / 1s rotate REST.
+                prepared = await prepare_next_window(next_after)
+                stats.list_next_queued = False
             else:
                 stats.list_next_queued = False
-                write_paper_stats(stats_path, stats)
-            reason = await run_watch(prefetch)
-            prepared = None
-            if prefetch is not None:
-                if prefetch.done() and not prefetch.cancelled():
-                    with contextlib.suppress(Exception):
-                        prepared = prefetch.result()
-                else:
-                    prefetch.cancel()
-                    with contextlib.suppress(asyncio.CancelledError, Exception):
-                        await prefetch
+            stop_at = (
+                time.monotonic()
+                if hold_s <= 0
+                else window_started + hold_s
+            )
+            stats.list_hold_s = max(0.0, stop_at - time.monotonic())
+            write_paper_stats(stats_path, stats)
+            reason = await run_watch_until(stop_at)
+            stats.list_hold_s = 0
             if (
-                reason == "swap"
+                reason in {"swap", "hold"}
                 and prepared is not None
                 and time.monotonic() < deadline
             ):
@@ -1481,6 +1494,7 @@ async def run_paper(
                 persist_seen(force=True)
                 write_paper_stats(stats_path, stats)
                 await snapshot_current(raise_if_all_fail=False)
+                window_started = time.monotonic()
                 continue
             now_ms = _now_ms()
             clean_end = reason == "deadline" or time.monotonic() >= deadline

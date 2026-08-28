@@ -326,6 +326,8 @@ def test_write_paper_stats_has_no_account_fields(tmp_path: Path) -> None:
         "list_cursor": None,
         "list_wraps": 0,
         "list_next_queued": False,
+        "list_window_s": 60,
+        "list_hold_s": 0,
         "listed_unique": 0,
         "universe_unique": 0,
         "walked_unique": 0,
@@ -552,6 +554,7 @@ def test_html_uses_fullscreen_board_and_histogram_bars(tmp_path: Path) -> None:
     assert "list window" in page
     assert "unique listed" in page
     assert "unique walked" in page
+    assert "next 5000 every" in page
     assert "Different markets gone through" in page
     assert "9000" in page
     assert "800" in page

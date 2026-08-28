@@ -40,8 +40,8 @@ uv run python scripts/paper_run.py --seconds 3600
 # Still refuses neg-risk / delay / non-binary / short crypto windows.
 # REST books in batches of 50 token ids (up to 4 in flight).
 # Watches 40 pairs (80 tokens); remaining window pairs rotate every 1s.
-# When the official next_cursor is set, the next 5000 is listed in the
-# background and swapped in. Do not subscribe all 1540. Do not raise 5000.
+# Next 5000 is listed, then the window swaps about every 60s.
+# Do not subscribe all 1540. Do not raise 5000.
 uv run python scripts/paper_run.py --all-markets --seconds 3600
 # equivalent: --max-markets 0
 # optional: --book-batch-size 50 --watch-pairs 40 --watch-rotate-s 1

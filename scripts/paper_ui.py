@@ -371,6 +371,8 @@ def summarize_dashboard(
     listed_unique = 0
     universe_unique = 0
     walked_unique = 0
+    list_window_s = 60
+    list_hold_s = 0
     best_edge = None
     closest: dict[str, Any] | None = None
     edge_histogram: dict[str, Any] = {}
@@ -387,6 +389,8 @@ def summarize_dashboard(
         listed_unique = _int_or_zero(stats.get("listed_unique"))
         universe_unique = _int_or_zero(stats.get("universe_unique"))
         walked_unique = _int_or_zero(stats.get("walked_unique"))
+        list_window_s = _int_or_zero(stats.get("list_window_s")) or 60
+        list_hold_s = _int_or_zero(stats.get("list_hold_s"))
         jsonl_gaps = max(jsonl_gaps, _int_or_zero(stats.get("gaps")))
         jsonl_intents = max(jsonl_intents, _int_or_zero(stats.get("intents")))
         jsonl_rejects = max(jsonl_rejects, _int_or_zero(stats.get("rejects")))
@@ -498,6 +502,8 @@ def summarize_dashboard(
             "listed_unique": listed_unique,
             "universe_unique": universe_unique,
             "walked_unique": walked_unique,
+            "list_window_s": list_window_s,
+            "list_hold_s": list_hold_s,
             "best_edge": best_edge,
             "closest": closest,
             "edge_histogram": edge_histogram,
@@ -754,6 +760,8 @@ def render_html(summary: dict[str, Any]) -> str:
     listed_unique = paper.get("listed_unique", 0)
     universe_unique = paper.get("universe_unique", 0)
     walked_unique = paper.get("walked_unique", 0)
+    list_window_s = paper.get("list_window_s", 60)
+    list_hold_s = paper.get("list_hold_s", 0)
     pnl_lost = daily_pnl.startswith("-")
     pnl_label = "lost" if pnl_lost else "earned"
     pnl_class = "lost" if pnl_lost else "earned"
@@ -805,7 +813,16 @@ def render_html(summary: dict[str, Any]) -> str:
     )
     list_note = (
         f"list window {_esc(list_window)}"
-        + (" · next 5000 queued" if list_next else "")
+        + f" · next 5000 every {_esc(list_window_s)}s"
+        + (
+            f" · listing next 5000"
+            if list_next
+            else (
+                f" · swap in {_esc(list_hold_s)}s"
+                if _int_or_zero(list_hold_s) > 0
+                else ""
+            )
+        )
         + f" · unique listed {_esc(listed_unique)}"
         + f" · unique walked {_esc(walked_unique)}"
         + (

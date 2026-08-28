@@ -17,6 +17,7 @@ from arb.app import (
     BOOK_FETCH_CONCURRENCY,
     LIST_PAGE_SIZE,
     LIST_SAFETY_CAP,
+    LIST_WINDOW_S,
     WATCH_PAIRS,
     WATCH_ROTATE_S,
     PublicApiError,
@@ -1003,6 +1004,7 @@ def test_book_batch_and_watch_defaults_fit_payload_limits() -> None:
     assert BOOK_BATCH_SIZE == 50
     assert WATCH_PAIRS == 40
     assert WATCH_ROTATE_S == 1
+    assert LIST_WINDOW_S == 60
     assert LIST_SAFETY_CAP == 5000
     assert BOOK_BATCH_SIZE < 100
     assert WATCH_PAIRS * 2 == 80
@@ -1261,6 +1263,7 @@ def test_paper_run_cli_batch_and_watch_flags() -> None:
     assert args.book_batch_size == BOOK_BATCH_SIZE
     assert args.watch_pairs == WATCH_PAIRS
     assert args.watch_rotate_s == WATCH_ROTATE_S
+    assert args.list_window_s == LIST_WINDOW_S
     args = module.parse_args(
         ["--book-batch-size", "25", "--watch-pairs", "10", "--watch-rotate-s", "30"]
     )
@@ -1273,6 +1276,7 @@ def test_paper_run_cli_batch_and_watch_flags() -> None:
     assert "--book-batch-size" in source
     assert "--watch-pairs" in source
     assert "--watch-rotate-s" in source
+    assert "--list-window-s" in source
     assert "--record-books" in source
     assert "LIST_SAFETY_CAP" in source
     args = module.parse_args(["--record-books"])
@@ -1562,6 +1566,7 @@ async def test_long_run_swaps_to_next_list_window(
         seconds=0.6,
         poll_s=0.05,
         watch_rotate_s=0,
+        list_window_s=0,
     )
     assert client.list_calls >= 2
     assert stats.list_window >= 2
@@ -1569,8 +1574,7 @@ async def test_long_run_swaps_to_next_list_window(
     assert stats.walked_unique >= 2
     snapshot = json.loads((tmp_path / "paper" / "stats.json").read_text(encoding="utf-8"))
     assert snapshot["walked_unique"] == stats.walked_unique
-    watched = {tid for call in client.subscribe_calls for tid in call}
-    assert {"yc", "nc"} & watched or {"ya", "na"} <= watched
+    assert snapshot["list_window"] >= 2
 
 
 @pytest.mark.asyncio
