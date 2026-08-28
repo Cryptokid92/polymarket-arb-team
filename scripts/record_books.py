@@ -103,7 +103,8 @@ async def record_public_books(
     condition_id: str = "",
 ) -> int:
     """Write watch-slice public books. Returns lines written."""
-    markets = await _iter_listed_markets(client, max_markets)
+    listed = await _iter_listed_markets(client, max_markets)
+    markets = listed.markets
     pairs = []
     by_token: dict[str, object] = {}
     for market in markets:

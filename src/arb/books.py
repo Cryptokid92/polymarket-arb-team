@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 from decimal import ROUND_DOWN, Decimal
+from collections.abc import Sequence
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, field_validator
@@ -166,6 +167,12 @@ class BookStore:
 
     def get(self, token_id: str) -> Book | None:
         return self._books.get(token_id)
+
+    def retain(self, token_ids: Sequence[str]) -> None:
+        """Drop books that left the current list window. Keeps memory bounded."""
+        keep = {str(token) for token in token_ids}
+        self._books = {key: book for key, book in self._books.items() if key in keep}
+        self._hashes = {key: digest for key, digest in self._hashes.items() if key in keep}
 
     def book_hash(self, token_id: str) -> str | None:
         return self._hashes.get(token_id)

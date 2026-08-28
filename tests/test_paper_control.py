@@ -18,10 +18,12 @@ from arb.paper_control import (
     default_spawn,
     effective_rotate_s,
     read_control,
+    resume_paper_halt,
     runner_is_alive,
     write_control,
     write_pid,
 )
+from arb.state import StateStore
 
 
 def test_rotate_defaults_match_watch_slice() -> None:
@@ -133,6 +135,40 @@ def test_stop_and_spawn_source_stay_paper_only() -> None:
     assert "ARB_MODE" in inspect.getsource(default_spawn)
     assert "paper_run.py" in inspect.getsource(default_spawn)
     assert "--place-orders" not in inspect.getsource(default_spawn)
+
+
+def test_start_resumes_ws_stale_when_no_halt_file(tmp_path: Path) -> None:
+    data_dir = tmp_path / "paper"
+    data_dir.mkdir()
+    store = StateStore(data_dir / "state.sqlite")
+    store.set_halted(True, reason="ws_stale")
+    spawned: list[tuple[Path, Path]] = []
+
+    def spawn(root: Path, data_dir: Path) -> None:
+        spawned.append((root, data_dir))
+
+    result = apply_control(
+        data_dir, action="start", project_root=tmp_path, spawn=spawn
+    )
+    assert result["ok"] is True
+    assert resume_paper_halt(tmp_path, data_dir) is True
+    restored = StateStore(data_dir / "state.sqlite").restore()
+    assert restored.halted is False
+    assert restored.halt_reason == ""
+    assert spawned == [(tmp_path, data_dir)]
+
+
+def test_start_does_not_resume_when_halt_file_present(tmp_path: Path) -> None:
+    data_dir = tmp_path / "paper"
+    data_dir.mkdir()
+    store = StateStore(data_dir / "state.sqlite")
+    store.set_halted(True, reason="ws_stale")
+    (tmp_path / "HALT").write_text("stop\n", encoding="utf-8")
+    apply_control(data_dir, action="start", project_root=tmp_path, spawn=lambda *_: None)
+    restored = StateStore(data_dir / "state.sqlite").restore()
+    assert restored.halted is True
+    assert restored.halt_reason == "ws_stale"
+    assert resume_paper_halt(tmp_path, data_dir) is False
 
 
 def test_write_control_does_not_touch_risk_keys(tmp_path: Path) -> None:

@@ -38,9 +38,9 @@ This is not a directional bet. It is not cross-market arb. It is not a mid signa
 
 One Python process. Specialists are functions, not separate services. There is an in-process bus (`arb.bus`) if something wants to subscribe. The paper loop calls the pipeline directly.
 
-1. **List markets.** `AsyncPublicClient.list_markets(closed=False, page_size=100)`. Walk official pages until the catalog ends, `--max-markets`, or the documented safety ceiling (`5000`). Default `--max-markets` is 20 (tests). `--all-markets` or `--max-markets 0` means no user cap. `markets_listed` is every market seen; `universe` is what `reject_universe` kept. If the public API is unreachable, the runner exits with a clear error and does not fake gaps.
+1. **List markets.** `AsyncPublicClient.list_markets(closed=False, page_size=100)`. Walk official pages for one window until the catalog ends, `--max-markets`, or the documented safety ceiling (`5000`). Resume the next window with official `next_cursor` / `from_cursor` (persisted under the data dir). Default `--max-markets` is 20 (tests). `--all-markets` or `--max-markets 0` means no user cap; 5000 is the window size, not the whole ~180k catalog. `markets_listed` is every market seen in the current window; `universe` is what `reject_universe` kept. If the public API is unreachable, the runner exits with a clear error and does not fake gaps.
 2. **v1 universe filter.** Drop closed/archived, not accepting, neg-risk, delayed (`seconds_delay > 0`), missing YES/NO token ids, and 5/15-minute crypto windows (slug/question/tags matching crypto plus a 5 or 15 minute window).
-3. **Books.** REST snapshot of kept YES/NO token ids in batches (`get_order_books`, default `--book-batch-size 50`). Apply each batch. A failed batch is logged (`book_batch_failed`) and skipped; `PublicApiError` only if every batch fails. Then websocket `subscribe(MarketSpec(token_ids=...))` on a first watch slice only (default `--watch-pairs 40` = 80 tokens). The slice **pins** up to 8 highest walked-edge pairs (`PIN_HOT_PAIRS`) and rotates the rest every `--watch-rotate-s` seconds (default 10). If `subscribe` is missing, poll REST in the same batches. `BookStore` applies snapshots and `price_change` deltas. Do not subscribe all ~1540 pairs at once. Do not raise the listing safety ceiling as a books-payload fix.
+3. **Books.** REST snapshot of kept YES/NO token ids in batches (`get_order_books`, default `--book-batch-size 50`, at most 4 in flight). Watch-slice tokens are fetched first. A batch only `consider()`s pairs whose YES+NO books are now present. A failed batch is logged (`book_batch_failed`) and skipped; `PublicApiError` only if every batch fails. Then websocket `subscribe(MarketSpec(token_ids=...))` on a first watch slice only (default `--watch-pairs 40` = 80 tokens). The slice **pins** up to 8 highest walked-edge pairs (`PIN_HOT_PAIRS`) and rotates the rest every `--watch-rotate-s` seconds (default 10). If `subscribe` is missing, poll REST in the same batches. While watching, the next 5000-market window is listed in the background and swapped in when ready. `BookStore.retain` drops tokens that left the window. Do not subscribe all ~1540 pairs at once. Do not raise the listing safety ceiling.
 4. **Near-miss.** Every consider walks ask depth even when hunt is silent. Best walked `raw_edge`, fillable size, book age, and in-watch flag go to `stats.json` / `nearmiss.jsonl`. Thin books do not invent an edge from top-of-book. This is telemetry, not a trade.
 5. **Hunt.** `hunt()` walks both ask books. No gap → nothing else runs. `min_edge` stays `0.01`.
 6. **Risk.** `approve()` may clip size to `max_notional_per_trade` and re-walk both sides. Refusal reasons below.
@@ -106,10 +106,10 @@ It trips on:
 
 1. **Daily loss.** Realized PnL plus optional unrealized `<= -max_daily_loss`.
 2. **`HALT` file** in the project root.
-3. **WS silence.** Age of last stream/poll *receive* `> ws_stale_ms` (default 3000). This is `StreamHeartbeat` in `app.py`: time of the last REST snapshot or WS/poll delivery. It is **not** CLOB `Book.ts_ms`. Book timestamps are only for hunter/risk `stale_ms`.
+3. **WS silence.** Age of last stream/poll *receive* `> ws_stale_ms` (default 3000). This is `StreamHeartbeat` in `app.py`: time of the last REST snapshot or WS/poll delivery. It is **not** CLOB `Book.ts_ms`. Book timestamps are only for hunter/risk `stale_ms`. A quiet or closed subscribe iterator REST-probes the current watch first and reconnects if the probe works. Planned hour end does not persist `ws_stale`. Do not raise `ws_stale_ms`.
 4. **Hedge incidents.** `>= 3` rows in sqlite `hedge_incidents` in the last hour.
 
-Paper halt only sets the flag. Live `cancel_all` is Task 12.
+Paper halt only sets the flag. Live `cancel_all` is Task 12. Paper Start is the human resume when no `HALT` file is present (`resume_paper_halt`). The runner loop never auto-resumes.
 
 The paper runner wires halt-file and WS-silence into this loop. It restores `daily_pnl` / paper bankroll from sqlite (default bankroll 500) and updates them on paper fills. It does not write hedge incidents on a complete pair fill.
 
@@ -137,7 +137,7 @@ Then:
 uv run python scripts/report_paper.py
 ```
 
-`--once` is one list+book cycle, then exit. `--place-orders` is rejected on both runner and UI. `--all-markets` walks listing pages (ceiling 5000). `--book-batch-size`, `--watch-pairs`, and `--watch-rotate-s` cap REST/WS payloads; they do not loosen universe or risk.
+`--once` is one 5000-market window, then exit (saves `next_cursor` for the next run). `--place-orders` is rejected on both runner and UI. `--all-markets` walks listing pages in 5000-market windows via official cursors. `--book-batch-size`, `--watch-pairs`, and `--watch-rotate-s` cap REST/WS payloads; they do not loosen universe or risk.
 
 Logs are gitignored under `data/` (default `data/paper/`):
 
@@ -147,12 +147,13 @@ Logs are gitignored under `data/` (default `data/paper/`):
 - `nearmiss.jsonl` — closest walked books (new best or non-negative walked edge)
 - `alerts.jsonl` — local paper alerts when an intent is chosen
 - `books.jsonl` — optional recorded public books (`--record-books`)
-- `stats.json` — listed / universe / gap / intent / reject / fill counts, `bankroll`, `daily_pnl`, closest edge, histogram, `heartbeat_ms`
+- `stats.json` — listed / universe / gap / intent / reject / fill counts, `bankroll`, `daily_pnl`, closest edge, histogram, list window, `heartbeat_ms`
+- `list_cursor.json` — official `next_cursor` plus next window number
 - `fills.jsonl` — paper fills, completed pairs, naked incidents
 - `control.json` — local pause + watch-rotate interval (10–120s)
 - `state.sqlite` — halt flag, halt reason, paper fills, bankroll, daily_pnl (path injectable)
 
-`paper_ui.py` is stdlib `http.server`. Binds `127.0.0.1:8765`. Banner: **PAPER MODE. Not live. Not financial advice.** Auto-refresh every 2s. Shows paper bankroll, earned/lost, intents, fills. Local Start/Stop and the watch-rotate slider are POSTs to `/api/control` only. Missing logs show zeros. It does not invent trades. Hosts other than localhost are refused. Paper $500 is not real money.
+`paper_ui.py` is stdlib `http.server`. Binds `127.0.0.1:8765`. Banner: **PAPER MODE. Not live. Not financial advice.** Auto-refresh every 2s. Shows paper bankroll, earned/lost, intents, fills, list window, and the watch slice. Local Start/Stop and the watch-rotate slider are POSTs to `/api/control` only. Start resumes a prior `ws_stale` when no `HALT` file is present. Missing logs show zeros. It does not invent trades. Hosts other than localhost are refused. Paper $500 is not real money.
 
 `report_paper.py` prints gaps seen, intents approved, estimated maker EV, estimated taker EV, reject reasons, and halt reason if sqlite has one.
 

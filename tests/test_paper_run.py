@@ -14,6 +14,7 @@ from polymarket.models.clob.market_events import parse_market_event
 
 from arb.app import (
     BOOK_BATCH_SIZE,
+    BOOK_FETCH_CONCURRENCY,
     LIST_PAGE_SIZE,
     LIST_SAFETY_CAP,
     WATCH_PAIRS,
@@ -22,8 +23,11 @@ from arb.app import (
     StreamHeartbeat,
     _iter_listed_markets,
     chunk_ids,
+    fetch_book_batches,
     listing_limit,
     pair_token_ids,
+    pairs_ready_from_batch,
+    read_list_cursor_state,
     reject_universe,
     run_paper,
     stream_liveness_probe_due,
@@ -131,26 +135,38 @@ class _PagedPaginator:
 
     `iter_items` only yields the first page so a one-page `page_size=max_markets`
     walk cannot pretend to have exhausted the catalog.
+    `from_cursor` / `next_cursor` match the official SDK resume API.
     """
 
-    def __init__(self, pages: list[list[object]]) -> None:
+    def __init__(self, pages: list[list[object]], *, start: int = 0) -> None:
         self._pages = pages
+        self._start = start
         self.pages_yielded = 0
+
+    def from_cursor(self, cursor: str) -> _PagedPaginator:
+        start = 0
+        if isinstance(cursor, str) and cursor.startswith("p"):
+            try:
+                start = int(cursor[1:])
+            except ValueError:
+                start = 0
+        return _PagedPaginator(self._pages, start=start)
 
     def __aiter__(self):
         return self._iter_pages()
 
     async def _iter_pages(self):
-        for page in self._pages:
+        for index in range(self._start, len(self._pages)):
             self.pages_yielded += 1
-            yield SimpleNamespace(items=tuple(page))
+            nxt = f"p{index + 1}" if index + 1 < len(self._pages) else None
+            yield SimpleNamespace(items=tuple(self._pages[index]), next_cursor=nxt)
 
     def iter_items(self):
         async def gen():
             if not self._pages:
                 return
             self.pages_yielded += 1
-            for item in self._pages[0]:
+            for item in self._pages[self._start] if self._start < len(self._pages) else []:
                 yield item
 
         return gen()
@@ -165,8 +181,10 @@ class _PagedPublic:
         self.book_call_ids: list[list[str]] = []
         self.subscribed_token_ids: list[str] = []
         self.subscribe_calls: list[list[str]] = []
+        self.list_calls = 0
 
     def list_markets(self, *, closed: bool = False, page_size: int = 20, **kwargs):
+        self.list_calls += 1
         self.list_kwargs = {"closed": closed, "page_size": page_size, **kwargs}
         self.paginator = _PagedPaginator(self.pages)
         return self.paginator
@@ -246,6 +264,9 @@ class _ClosedStreamPublic(_MockPublic):
     """Subscribe iterator ends immediately after the REST snapshot."""
 
     def subscribe(self, token_ids: list[str]):
+        self.subscribe_calls.append(list(token_ids))
+        self.subscribed_token_ids = list(token_ids)
+
         async def gen():
             if False:
                 yield []
@@ -488,6 +509,7 @@ def test_list_all_markets_does_not_loosen_universe_or_risk() -> None:
     assert "list_markets(closed=False, page_size=LIST_PAGE_SIZE)" in source
     assert "list_markets(closed=False, page_size=max_markets)" not in source
     assert "async for page in listed" in source
+    assert "from_cursor" in source
     assert 'return "neg_risk"' in source
     assert "seconds_delay" in source
     assert "short_crypto_window" in source
@@ -511,7 +533,8 @@ async def test_iter_listed_markets_walks_pages_not_one_page_size() -> None:
         ],
     ]
     client = _PagedPublic(pages)
-    items = await _iter_listed_markets(client, 0)
+    window = await _iter_listed_markets(client, 0)
+    items = window.markets
     assert [m.condition_id for m in items] == [
         "p0-a",
         "p0-b",
@@ -520,6 +543,7 @@ async def test_iter_listed_markets_walks_pages_not_one_page_size() -> None:
         "p2-a",
         "p2-b",
     ]
+    assert window.next_cursor is None
     assert client.list_kwargs["closed"] is False
     assert client.list_kwargs["page_size"] == LIST_PAGE_SIZE
     assert client.list_kwargs["page_size"] != 0
@@ -535,8 +559,10 @@ async def test_iter_listed_markets_user_cap_still_walks_pages() -> None:
         [_market(condition_id="p2-a"), _market(condition_id="p2-b")],
     ]
     client = _PagedPublic(pages)
-    items = await _iter_listed_markets(client, 3)
+    window = await _iter_listed_markets(client, 3)
+    items = window.markets
     assert [m.condition_id for m in items] == ["p0-a", "p0-b", "p1-a"]
+    assert window.next_cursor == "p2"
     assert client.list_kwargs["page_size"] == LIST_PAGE_SIZE
     assert client.list_kwargs["page_size"] != 3
     assert client.paginator is not None
@@ -554,8 +580,10 @@ async def test_iter_listed_markets_safety_cap_stops_walk(
         [_market(condition_id="p2-a"), _market(condition_id="p2-b")],
     ]
     client = _PagedPublic(pages)
-    items = await _iter_listed_markets(client, 0)
+    window = await _iter_listed_markets(client, 0)
+    items = window.markets
     assert len(items) == 4
+    assert window.next_cursor == "p2"
     assert client.list_kwargs["page_size"] == LIST_PAGE_SIZE
     assert client.paginator is not None
     assert client.paginator.pages_yielded == 2
@@ -868,9 +896,45 @@ async def test_quiet_subscribe_failed_rest_probe_trips_ws_stale(tmp_path: Path) 
 
 
 @pytest.mark.asyncio
-async def test_subscribe_iterator_end_trips_ws_stale(tmp_path: Path) -> None:
+async def test_subscribe_iterator_end_successful_probe_does_not_trip(
+    tmp_path: Path,
+) -> None:
     client = _ClosedStreamPublic([_market()], _gap_books())
     data_dir = tmp_path / "paper"
+    await run_paper(
+        client=client,
+        settings=_settings(),
+        project_root=tmp_path,
+        data_dir=data_dir,
+        once=False,
+        seconds=0.4,
+        poll_s=0.05,
+    )
+    restored = StateStore(data_dir / "state.sqlite").restore()
+    assert restored.halted is False
+    assert len(client.subscribe_calls) >= 2
+
+
+@pytest.mark.asyncio
+async def test_subscribe_iterator_end_failed_probe_trips_ws_stale(
+    tmp_path: Path,
+) -> None:
+    client = _ClosedStreamPublic([_market()], _gap_books(), fail_books=True)
+    data_dir = tmp_path / "paper"
+    # Opening snapshot must succeed; fail only the reconnect probe.
+    first = True
+
+    async def flaky(*, token_ids: list[str]):
+        nonlocal first
+        client.book_calls += 1
+        client.book_call_ids.append(list(token_ids))
+        client.book_token_ids = list(token_ids)
+        if first:
+            first = False
+            return [client.books[tid] for tid in token_ids if tid in client.books]
+        raise TimeoutError("timed out")
+
+    client.get_order_books = flaky  # type: ignore[method-assign]
     await run_paper(
         client=client,
         settings=_settings(),
@@ -989,6 +1053,7 @@ def test_batch_books_does_not_loosen_universe_or_risk() -> None:
     source = Path("src/arb/app.py").read_text(encoding="utf-8")
     assert "LIST_SAFETY_CAP = 5000" in source
     assert "BOOK_BATCH_SIZE = 50" in source
+    assert "BOOK_FETCH_CONCURRENCY = 4" in source
     assert "WATCH_PAIRS = 40" in source
     assert "fetch_book_batches" in source
     assert 'return "neg_risk"' in source
@@ -1348,8 +1413,258 @@ async def test_honest_p_miss_one_on_taker_path(tmp_path: Path) -> None:
 def test_helper_caps_stay_tight() -> None:
     assert LIST_SAFETY_CAP == 5000
     assert BOOK_BATCH_SIZE == 50
+    assert BOOK_FETCH_CONCURRENCY == 4
+    assert BOOK_FETCH_CONCURRENCY < BOOK_BATCH_SIZE
     assert WATCH_PAIRS == 40
     from arb.app import PIN_HOT_PAIRS
 
     assert PIN_HOT_PAIRS == 8
     assert PIN_HOT_PAIRS <= WATCH_PAIRS
+
+
+@pytest.mark.asyncio
+async def test_iter_listed_markets_resumes_from_cursor() -> None:
+    pages = [
+        [_market(condition_id="p0-a"), _market(condition_id="p0-b")],
+        [_market(condition_id="p1-a"), _market(condition_id="p1-b")],
+        [_market(condition_id="p2-a"), _market(condition_id="p2-b")],
+    ]
+    client = _PagedPublic(pages)
+    first = await _iter_listed_markets(client, 2)
+    assert [m.condition_id for m in first.markets] == ["p0-a", "p0-b"]
+    assert first.next_cursor == "p1"
+    second = await _iter_listed_markets(client, 2, after_cursor="p1")
+    assert [m.condition_id for m in second.markets] == ["p1-a", "p1-b"]
+    assert second.next_cursor == "p2"
+    last = await _iter_listed_markets(client, 2, after_cursor="p2")
+    assert [m.condition_id for m in last.markets] == ["p2-a", "p2-b"]
+    assert last.next_cursor is None
+
+
+@pytest.mark.asyncio
+async def test_paper_run_once_persists_cursor_and_next_window(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("arb.app.LIST_SAFETY_CAP", 2)
+    pages = [
+        [
+            _market(condition_id="a", yes_id="ya", no_id="na"),
+            _market(condition_id="b", yes_id="yb", no_id="nb"),
+        ],
+        [
+            _market(condition_id="c", yes_id="yc", no_id="nc"),
+            _market(condition_id="d", yes_id="yd", no_id="nd"),
+        ],
+        [
+            _market(condition_id="e", yes_id="ye", no_id="ne"),
+            _market(condition_id="f", yes_id="yf", no_id="nf"),
+        ],
+    ]
+    data_dir = tmp_path / "paper"
+    books = {
+        "ya": _book("ya", "0.54", "0.55"),
+        "na": _book("na", "0.41", "0.42"),
+        "yb": _book("yb", "0.54", "0.55"),
+        "nb": _book("nb", "0.41", "0.42"),
+        "yc": _book("yc", "0.54", "0.55"),
+        "nc": _book("nc", "0.41", "0.42"),
+        "yd": _book("yd", "0.54", "0.55"),
+        "nd": _book("nd", "0.41", "0.42"),
+        "ye": _book("ye", "0.54", "0.55"),
+        "ne": _book("ne", "0.41", "0.42"),
+        "yf": _book("yf", "0.54", "0.55"),
+        "nf": _book("nf", "0.41", "0.42"),
+    }
+
+    class _PagedBooks(_PagedPublic):
+        async def get_order_books(self, *, token_ids: list[str]):
+            self.book_call_ids.append(list(token_ids))
+            self.book_token_ids.extend(token_ids)
+            return [books[tid] for tid in token_ids if tid in books]
+
+    client = _PagedBooks(pages)
+    first = await run_paper(
+        client=client,
+        settings=_settings(),
+        project_root=tmp_path,
+        data_dir=data_dir,
+        max_markets=0,
+        once=True,
+    )
+    assert first.markets_listed == 2
+    assert first.list_window == 1
+    assert first.list_cursor == "p1"
+    cursor, next_window, wraps = read_list_cursor_state(data_dir)
+    assert cursor == "p1"
+    assert next_window == 2
+    assert wraps == 0
+    second = await run_paper(
+        client=client,
+        settings=_settings(),
+        project_root=tmp_path,
+        data_dir=data_dir,
+        max_markets=0,
+        once=True,
+    )
+    assert second.markets_listed == 2
+    assert second.list_window == 2
+    assert second.list_cursor == "p2"
+    snapshot = json.loads((data_dir / "stats.json").read_text(encoding="utf-8"))
+    assert snapshot["list_window"] == 2
+    assert snapshot["list_cursor"] == "p2"
+
+
+@pytest.mark.asyncio
+async def test_long_run_swaps_to_next_list_window(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("arb.app.LIST_SAFETY_CAP", 2)
+    pages = [
+        [
+            _market(condition_id="a", yes_id="ya", no_id="na"),
+            _market(condition_id="b", yes_id="yb", no_id="nb"),
+        ],
+        [
+            _market(condition_id="c", yes_id="yc", no_id="nc"),
+            _market(condition_id="d", yes_id="yd", no_id="nd"),
+        ],
+    ]
+    books = {
+        "ya": _book("ya", "0.54", "0.55"),
+        "na": _book("na", "0.41", "0.42"),
+        "yb": _book("yb", "0.54", "0.55"),
+        "nb": _book("nb", "0.41", "0.42"),
+        "yc": _book("yc", "0.54", "0.55"),
+        "nc": _book("nc", "0.41", "0.42"),
+        "yd": _book("yd", "0.54", "0.55"),
+        "nd": _book("nd", "0.41", "0.42"),
+    }
+
+    class _PagedSilent(_PagedPublic):
+        async def get_order_books(self, *, token_ids: list[str]):
+            self.book_call_ids.append(list(token_ids))
+            self.book_token_ids.extend(token_ids)
+            return [books[tid] for tid in token_ids if tid in books]
+
+        def subscribe(self, token_ids: list[str]):
+            self.subscribe_calls.append(list(token_ids))
+            self.subscribed_token_ids = list(token_ids)
+            return _keep_subscribe_open([])
+
+    client = _PagedSilent(pages)
+    stats = await run_paper(
+        client=client,
+        settings=_settings(),
+        project_root=tmp_path,
+        data_dir=tmp_path / "paper",
+        max_markets=0,
+        once=False,
+        seconds=0.6,
+        poll_s=0.05,
+        watch_rotate_s=0,
+    )
+    assert client.list_calls >= 2
+    assert stats.list_window >= 2
+    watched = {tid for call in client.subscribe_calls for tid in call}
+    assert {"yc", "nc"} & watched or {"ya", "na"} <= watched
+
+
+@pytest.mark.asyncio
+async def test_consider_only_pairs_ready_from_batch(tmp_path: Path) -> None:
+    n = 4
+    client = _MockPublic(_gap_markets(n), _gap_books_n(n))
+    stats = await run_paper(
+        client=client,
+        settings=_settings(),
+        project_root=tmp_path,
+        data_dir=tmp_path / "paper",
+        once=True,
+        book_batch_size=2,
+    )
+    assert stats.universe == n
+    assert stats.nearmiss_considers == n
+
+
+@pytest.mark.asyncio
+async def test_snapshot_fetches_watch_tokens_first(tmp_path: Path) -> None:
+    n = 5
+    client = _MockPublic(_gap_markets(n), _gap_books_n(n))
+    await run_paper(
+        client=client,
+        settings=_settings(),
+        project_root=tmp_path,
+        data_dir=tmp_path / "paper",
+        once=True,
+        watch_pairs=2,
+        book_batch_size=2,
+    )
+    first = [tid for batch in client.book_call_ids[:2] for tid in batch]
+    assert first == ["y0", "n0", "y1", "n1"]
+
+
+@pytest.mark.asyncio
+async def test_fetch_book_batches_caps_in_flight() -> None:
+    class _SlowBooks:
+        def __init__(self) -> None:
+            self.in_flight = 0
+            self.max_in_flight = 0
+
+        async def get_order_books(self, *, token_ids: list[str]):
+            self.in_flight += 1
+            self.max_in_flight = max(self.max_in_flight, self.in_flight)
+            await asyncio.sleep(0.04)
+            self.in_flight -= 1
+            return []
+
+    client = _SlowBooks()
+    ids = [f"t{i}" for i in range(8)]
+    ok, failed = await fetch_book_batches(
+        client, ids, batch_size=1, concurrency=4, raise_if_all_fail=False
+    )
+    assert ok == 8
+    assert failed == 0
+    assert client.max_in_flight == 4
+
+
+def test_pairs_ready_from_batch_requires_both_books() -> None:
+    from arb.app import UniversePair
+    from arb.books import BookStore
+    from arb.fee_agent import MarketFees
+    from arb.risk import MarketFlags
+
+    flags = MarketFlags(
+        accepting_orders=True, seconds_delay=0, neg_risk=False, binary=True
+    )
+    fees = MarketFees(yes_rate=Decimal("0"), no_rate=Decimal("0"))
+    pair = UniversePair(
+        condition_id="c",
+        yes_token_id="yes",
+        no_token_id="no",
+        flags=flags,
+        fees=fees,
+    )
+    store = BookStore()
+    assert pairs_ready_from_batch([pair], ["yes"], store) == []
+    store.apply_snapshot(
+        {
+            "token_id": "yes",
+            "bids": [{"price": "0.4", "size": "10"}],
+            "asks": [{"price": "0.5", "size": "10"}],
+            "tick": "0.01",
+            "min_order_size": "5",
+            "ts_ms": 1,
+        }
+    )
+    assert pairs_ready_from_batch([pair], ["yes"], store) == []
+    store.apply_snapshot(
+        {
+            "token_id": "no",
+            "bids": [{"price": "0.4", "size": "10"}],
+            "asks": [{"price": "0.5", "size": "10"}],
+            "tick": "0.01",
+            "min_order_size": "5",
+            "ts_ms": 1,
+        }
+    )
+    assert pairs_ready_from_batch([pair], ["yes"], store) == [pair]
+    assert pairs_ready_from_batch([pair], ["other"], store) == []

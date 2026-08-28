@@ -221,6 +221,8 @@ def test_halt_from_readonly_sqlite(tmp_path: Path) -> None:
     assert summary["halt"]["halt_reason"] == "ws_stale"
     page = ui.render_html(summary)
     assert "ws_stale" in page
+    assert "stream or REST probe failed" in page
+    assert "not daily loss" in page
 
 
 def test_html_banner_and_refresh() -> None:
@@ -320,6 +322,10 @@ def test_write_paper_stats_has_no_account_fields(tmp_path: Path) -> None:
         "nearmiss_considers": 0,
         "edge_histogram": {},
         "watch": [],
+        "list_window": 1,
+        "list_cursor": None,
+        "list_wraps": 0,
+        "list_next_queued": False,
         "heartbeat_ms": 1_700_000_000_123,
     }
     blob = path.read_text(encoding="utf-8")
@@ -537,6 +543,7 @@ def test_html_uses_fullscreen_board_and_histogram_bars(tmp_path: Path) -> None:
     assert summary["paper"]["watch"][0]["label"] == "Will it rain?"
     page = ui.render_html(summary)
     assert "Watching now" in page
+    assert "list window" in page
     assert "Will it rain?" in page
     assert "c-hot" in page
     assert "c-rot" in page
