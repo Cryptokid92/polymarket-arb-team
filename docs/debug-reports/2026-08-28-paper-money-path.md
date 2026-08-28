@@ -88,7 +88,7 @@ Official subscribe dies after list/`aclose`. `watch_silence` then passed stream 
 
 A clean 1-hour run listed the next 5000 (`listed_unique` 9956, `universe_unique` 3078) but `list_window` stayed 1 and `walked_unique` froze at 1545. `list_cursor.json` already had the next-page cursor. Listing 50 official pages plus the opening snapshot ate the 60s dwell; `run_watch_until` still opened official subscribe. `asyncio.wait_for` on that socket waits for aclose after cancel; official aclose often swallows `CancelledError`, so the swap never ran.
 
-Fix: if leftover hold is 0 after listing, apply the queued window immediately. Do not open subscribe. The dwell timer is created before consume. `consume_until` uses `asyncio.wait` + sleep, not `wait_for`. Caps unchanged. Task 12 stays dark.
+Fix: if leftover hold is 0 after listing, apply the queued window immediately. Do not open subscribe. The dwell timer is created before consume. `consume_until` uses `asyncio.wait` + sleep, not `wait_for`. A live subscribe flood also returns when the dwell ends (`now >= stop_at`), not only when `--seconds` is up. Caps unchanged. Task 12 stays dark.
 
 ## Catalog wrap (do not stop the hour)
 

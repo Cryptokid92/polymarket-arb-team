@@ -1811,6 +1811,56 @@ async def test_listing_overrun_still_swaps_window(
     assert snapshot["list_window"] >= 2
 
 
+def _busy_subscribe(events: list[object]):
+    async def gen():
+        for event in events:
+            yield event
+        while True:
+            await asyncio.sleep(0)
+            yield []
+
+    return gen()
+
+
+@pytest.mark.asyncio
+async def test_busy_subscribe_still_swaps_when_hold_expires(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A live subscribe flood must not keep list_window at 1 past the dwell."""
+    monkeypatch.setattr("arb.app.LIST_SAFETY_CAP", 2)
+
+    class _BusyStream(_PagedPublic):
+        async def get_order_books(self, *, token_ids: list[str]):
+            self.book_call_ids.append(list(token_ids))
+            self.book_token_ids.extend(token_ids)
+            books = _two_window_books()
+            return [books[tid] for tid in token_ids if tid in books]
+
+        def subscribe(self, token_ids: list[str]):
+            self.subscribe_calls.append(list(token_ids))
+            self.subscribed_token_ids = list(token_ids)
+            return _busy_subscribe([])
+
+    client = _BusyStream(_two_window_pages())
+    stats = await asyncio.wait_for(
+        run_paper(
+            client=client,
+            settings=_settings(),
+            project_root=tmp_path,
+            data_dir=tmp_path / "paper",
+            max_markets=0,
+            once=False,
+            seconds=0.7,
+            poll_s=0.05,
+            watch_rotate_s=0,
+            list_window_s=0.15,
+        ),
+        timeout=2.5,
+    )
+    assert stats.list_window >= 2
+    assert stats.listed_unique >= 4
+
+
 @pytest.mark.asyncio
 async def test_dead_subscribe_still_lists_next_5000_when_rest_ok(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch

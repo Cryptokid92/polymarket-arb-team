@@ -1497,7 +1497,7 @@ async def run_paper(
             persist_stats()
         return probe_ok
 
-    async def consume_slice() -> None:
+    async def consume_slice(*, stop_at: float) -> None:
         tokens = current_watch_tokens()
         if not tokens:
             return
@@ -1510,7 +1510,11 @@ async def run_paper(
                 on_batch_fail=log_batch_fail,
             ):
                 await handle_update(update)
-                if time.monotonic() >= deadline:
+                now = time.monotonic()
+                # Stop this slice when the 60s list dwell ends. Do not wait
+                # for --seconds. A live subscribe flood used to sit on
+                # window 1 after the next 5000 was already listed.
+                if now >= deadline or now >= stop_at:
                     return
         except asyncio.CancelledError:
             raise
@@ -1520,7 +1524,7 @@ async def run_paper(
             if await rest_probe_watch() == 0:
                 trip_dead_stream()
             return
-        if time.monotonic() >= deadline:
+        if time.monotonic() >= deadline or time.monotonic() >= stop_at:
             return
         if await rest_probe_watch() == 0:
             trip_dead_stream()
@@ -1536,7 +1540,7 @@ async def run_paper(
             leftover = min(deadline, stop_at) - now
             if leftover <= 0:
                 return "deadline" if time.monotonic() >= deadline else "swap"
-            slice_task = asyncio.create_task(consume_slice())
+            slice_task = asyncio.create_task(consume_slice(stop_at=stop_at))
             # Do not use wait_for. Official subscribe aclose often swallows
             # CancelledError; wait_for then never returns and window 1 sticks.
             timeout_task = asyncio.create_task(asyncio.sleep(leftover))
