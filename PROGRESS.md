@@ -78,6 +78,6 @@ Paper money path (Milestone 13, not Task 12): Phase A telemetry + watch-while-li
 
 - Plan: `docs/plans/cursor-paper-money-path.md`
 - Evidence: `docs/debug-reports/2026-08-28-paper-money-path.md`
-- `uv run pytest -q` — 261 passed
+- `uv run pytest -q` — 278 passed
 - List-window stall: if listing the next 5000 eats the 60s dwell, swap immediately (do not open subscribe). Window 1 must not stick after the next page is already listed.
 - `ALLOW_LIVE` was not created. Live trading is not enabled. No secrets committed.
