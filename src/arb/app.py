@@ -523,6 +523,22 @@ def _bump(stats: PaperRunStats, reason: str) -> None:
     stats.rejects[reason] = stats.rejects.get(reason, 0) + 1
 
 
+def _replace_path(tmp: Path, dest: Path) -> None:
+    last: OSError | None = None
+    for _ in range(40):
+        try:
+            tmp.replace(dest)
+            return
+        except OSError as exc:
+            last = exc
+            winerror = getattr(exc, "winerror", None)
+            if winerror not in {5, 32} and getattr(exc, "errno", None) != 13:
+                raise
+            time.sleep(0.05)
+    assert last is not None
+    raise last
+
+
 def write_paper_stats(
     path: Path,
     stats: PaperRunStats,
@@ -575,7 +591,7 @@ def write_paper_stats(
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(path.name + ".tmp")
     tmp.write_text(json.dumps(payload) + "\n", encoding="utf-8")
-    tmp.replace(path)
+    _replace_path(tmp, path)
 
 
 def listing_limit(max_markets: int) -> int:
@@ -730,7 +746,7 @@ def write_list_cursor_state(
     }
     tmp = path.with_name(path.name + ".tmp")
     tmp.write_text(json.dumps(payload) + "\n", encoding="utf-8")
-    tmp.replace(path)
+    _replace_path(tmp, path)
 
 
 def pairs_ready_from_batch(
